@@ -9,8 +9,9 @@ https://moneyinorder.cristianbagrin.com: the built app as static assets plus an 
 - Deploy once per session: push `main` and deploy when the session's work is done (or when the user asks), not after
   each milestone or fix, so his phone and laptop don't update mid-task. Commit locally as often as you like and batch
   several tasks into one push. This overrides any general "push after each milestone" rule.
-- Deploy with `npm run deploy` (typecheck, tests, build, then `wrangler deploy`; Wrangler must be logged in to Cloudflare
-  account `1da66eb742220c8ae068a08cdeeaade3`). Everything the Worker needs is in `wrangler.jsonc`.
+- Pushing `main` deploys it: Cloudflare (Workers Builds) builds and runs `wrangler deploy` for the Worker `moneyinorder`.
+  On Chris's Mac you can also deploy by hand: `set -a; source ~/.cloudflare-deploy.env; set +a; npm run deploy`
+  (typecheck, tests, build, `wrangler deploy`). Everything the Worker needs is in `wrangler.jsonc`.
 - Before pushing: `npm run typecheck && npm test && npm run build`.
 - The app must stay at one address: browser data (the budget on each device) belongs to the address, so a new domain
   means every device has to sign in again there. The old Netlify site and the move are covered in `MIGRATION.md`.
