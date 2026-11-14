@@ -59,8 +59,7 @@ function idbOf(dev: Device) {
   }
 }
 
-// The sync server: the real vault function over an in-memory Blobs store.
-vi.mock('@netlify/blobs', () => import('./fake-blobs'))
+// The sync server: the real vault handler over an in-memory R2 bucket.
 const accounts = new Set<string>()
 async function server(url: string, init: RequestInit = {}): Promise<Response> {
   const id = url.split('/').pop()!
@@ -73,8 +72,9 @@ async function server(url: string, init: RequestInit = {}): Promise<Response> {
     }
     return new Response(null, { status: accounts.has(id) ? 200 : 404 })
   }
-  const { default: vault } = await import('../netlify/functions/vault.mts')
-  return vault(new Request('http://local' + url, { method, headers: init.headers, body: init.body }), { params: { id } } as never)
+  const { vault } = await import('../worker/vault')
+  const { bucket } = await import('./fake-r2')
+  return vault(new Request('http://local' + url, { method, headers: init.headers, body: init.body }), id, bucket)
 }
 
 const local = new Map<string, string>()

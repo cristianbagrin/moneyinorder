@@ -1,8 +1,9 @@
 node_modules
 dist
-.netlify
+.wrangler
+.dev.vars
+netlify-dump*/
 *.local
 .DS_Store
-.local-blobs
 .claude/worktrees/
 *.log

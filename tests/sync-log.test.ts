@@ -1,7 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { stores } from './fake-blobs'
+import { bucket, countUnder, objects } from './fake-r2'
 
-// Two devices against the real vault function, backed by an in-memory Blobs store. Each device is a
+// Two devices against the real vault handler, backed by an in-memory R2 bucket. Each device is a
 // fresh copy of the store and sync modules with its own IndexedDB stand-in.
 const env = vi.hoisted(() => ({
   kv: new Map<string, unknown>(),
@@ -13,8 +13,6 @@ vi.mock('idb-keyval', () => ({
   set: async (k: string, v: unknown) => void env.kv.set(k, structuredClone(v)),
   update: async (k: string, f: (v: unknown) => unknown) => void env.kv.set(k, structuredClone(f(env.kv.get(k)))),
 }))
-
-vi.mock('@netlify/blobs', () => import('./fake-blobs'))
 
 type Device = { kv: Map<string, unknown>; sync: typeof import('../src/lib/sync'); S: typeof import('../src/lib/store') }
 
@@ -35,10 +33,10 @@ async function on(d: Device, fn?: () => unknown) {
 
 const CODE = 'ABCDE-FGHJK-MNPQR-STUVW'
 const last = (pick: (r: { method: string; bytes: number }) => boolean) => env.requests.filter(pick).pop()
-const changes = () => stores.get('vault-changes')?.size ?? 0
+const changes = () => countUnder('vault-changes/')
 
 beforeAll(async () => {
-  const { default: vault } = await import('../netlify/functions/vault.mts')
+  const { vault } = await import('../worker/vault')
   const target = new EventTarget()
   Object.defineProperty(globalThis, 'navigator', { value: { onLine: true }, configurable: true })
   Object.assign(globalThis, {
@@ -51,13 +49,13 @@ beforeAll(async () => {
     const id = url.split('/').pop()!
     const req = new Request('http://local' + url, { method: init.method, headers: init.headers, body: init.body })
     env.requests.push({ method: init.method ?? 'GET', bytes: typeof init.body === 'string' ? init.body.length : 0 })
-    return vault(req, { params: { id } } as never)
+    return vault(req, id, bucket)
   })
 })
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] })
-  stores.clear()
+  objects.clear()
   env.requests.length = 0
 })
 
@@ -121,7 +119,7 @@ describe('sync uploads changes, not the whole budget', () => {
   it('uploads everything again when the vault is gone', async () => {
     const a = await device()
     await on(a, () => a.sync.enableSync(CODE))
-    stores.clear()
+    objects.clear()
     await on(a, () => a.S.updateSettings({ savingsTarget: 0.2 }))
     expect(last((r) => r.method !== 'GET')!.method).toBe('PUT')
     const b = await device()

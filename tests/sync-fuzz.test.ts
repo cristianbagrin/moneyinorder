@@ -391,7 +391,7 @@ async function deliverAll() {
 // ---------------------------------------------------------------- the sync server
 
 const vault = new Map<string, { rev: string; body: string }>()
-/** Each vault's log of changes on top of its snapshot (see netlify/functions/vault.mts). */
+/** Each vault's log of changes on top of its snapshot (see worker/vault.ts). */
 const changes = new Map<string, Map<string, string>>()
 let changeNo = 0
 const emails = new Set<string>()
