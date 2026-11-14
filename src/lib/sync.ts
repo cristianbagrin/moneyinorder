@@ -5,7 +5,7 @@
 // the server never sees the password, the secret or the data. Budgets synced before accounts existed
 // used a random 20-character code in place of the secret, and keep working until the device signs in.
 //
-// The server keeps a snapshot of the budget plus a short log of changes (see netlify/functions/vault.mts).
+// The server keeps a snapshot of the budget plus a short log of changes (see worker/vault.ts).
 // An edit uploads only the records written since this device's last upload; now and then a device folds
 // the log into a new snapshot. Records merge commutatively and idempotently, so the log needs no locking.
 

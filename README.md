@@ -40,10 +40,10 @@ Sync works with an account: an email and a password (Settings → Sync). The pas
 - a **vault id** (`SHA-256("money-in-order/id/" + secret)`) that names the blob on the server, and
 - an **AES-GCM key** (`SHA-256("money-in-order/key/" + secret)`) that encrypts it.
 
-The server (`netlify/functions/vault.mts`, Netlify Blobs) stores a gzip-then-encrypted snapshot per vault plus a short log of encrypted changes, and only ever sees ciphertext.
+The server (`worker/vault.ts`, a Cloudflare Worker over an R2 bucket) stores a gzip-then-encrypted snapshot per vault plus a short log of encrypted changes, and only ever sees ciphertext.
 An edit uploads only the records written since the device's last upload (a change of a few hundred bytes), and a device that syncs downloads only the changes it lacks.
 Merging is commutative and idempotent, so changes are appended without any locking; once 30 have piled up, the next device to upload folds them into a new snapshot.
-`netlify/functions/account.mts` only notes that a hash of an email has an account, so one email can't get two budgets and a sign-in can say "wrong password".
+`worker/account.ts` only notes that a hash of an email has an account, so one email can't get two budgets and a sign-in can say "wrong password".
 Every snapshot write must name the revision it was based on, so two devices can't silently overwrite each other: the loser gets `412`, pulls, merges and retries.
 Records carry an update timestamp and tombstones, and merging keeps the newest version of each record, so devices converge whatever order they sync in.
 
@@ -57,7 +57,7 @@ npm install
 npm run dev          # UI only, no sync endpoint
 npm test             # budget math, targets, counting, merge, tabs and sync, and a randomized stress test
 STRESS_SEEDS=80 STRESS_STEPS=400 npm test   # the stress test, much harder
-npm run serve        # build + local server with a real Blobs emulator: sync works between tabs on http://localhost:4174
+npm run serve        # build + wrangler dev (the real Worker, local R2): sync works between tabs on http://localhost:4174
 ```
 
 Code map:
@@ -73,5 +73,14 @@ Code map:
 
 ## Deploying
 
-Netlify: connect the repo (build command and publish dir come from `netlify.toml`), or `netlify deploy --prod`.
-The sync function needs no configuration; Blobs is provisioned automatically.
+One Cloudflare Worker, configured in `wrangler.jsonc`: `dist/` as static assets (headers in `public/_headers`),
+`/api/*` handled by `worker/index.ts`, data in the R2 bucket `moneyinorder-data`, and the same rate limits as before
+(120 vault and 30 account requests a minute per IP).
+
+```sh
+npx wrangler login
+npx wrangler r2 bucket create moneyinorder-data   # once
+npm run deploy                                     # typecheck, test, build, wrangler deploy
+```
+
+Moving the data over from the old Netlify site: see `MIGRATION.md`.
