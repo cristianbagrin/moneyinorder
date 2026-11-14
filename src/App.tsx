@@ -7,6 +7,7 @@ import { logRepeats, redo } from './lib/store'
 import { RTA, type ID, type Txn } from './lib/types'
 import { useIndex, useSync, useToday } from './ui/hooks'
 import { runUndo, toast, Toasts } from './ui/kit'
+import { Moved } from './ui/moved'
 import { AccountsSheet } from './views/AccountsSheet'
 import { CategorySheet } from './views/CategorySheet'
 import { History } from './views/History'
@@ -184,6 +185,7 @@ export function App() {
       <div class="statusbar" />
       <Rail route={route} go={go} today={today} onAccounts={() => openAccounts()} />
       <main class={`main${route === 'today' ? ' main-today' : ''}`} key={route}>
+        <Moved />
         {page}
       </main>
       <TabBar route={route} go={go} today={today} />

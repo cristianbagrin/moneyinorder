@@ -1695,6 +1695,19 @@ textarea:focus {
 .acct-row input {
   min-height: 42px;
 }
+.moved {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: var(--r-sm);
+  background: var(--mark);
+  font-size: 14px;
+}
+.moved a {
+  color: var(--pen-deep);
+}
+
 .hint {
   font-size: 13.5px;
   color: var(--ink-3);
