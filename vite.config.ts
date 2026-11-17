@@ -3,6 +3,8 @@ import preact from '@preact/preset-vite'
 import { VitePWA } from 'vite-plugin-pwa'
 
 export default defineConfig({
+  // `MIO_API=http://127.0.0.1:4174 npm run dev`: the UI with sync against a local Worker (`npm run serve`).
+  server: process.env.MIO_API ? { proxy: { '/api': process.env.MIO_API } } : undefined,
   plugins: [
     preact(),
     VitePWA({
