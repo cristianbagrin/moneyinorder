@@ -1,0 +1,175 @@
+/* ---------------------------------------------------------------- sign-in follow-ups */
+
+.account-go {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+.account .btn.block + .account-link {
+  margin: 2px auto 0;
+}
+.account-link {
+  border: 0;
+  background: none;
+  padding: 6px 0;
+  font-size: 14px;
+  color: var(--pen);
+  text-decoration: none;
+}
+.account-link:hover {
+  text-decoration: underline;
+}
+.account-ask {
+  margin: 0 0 2px;
+  font-size: 15px;
+  line-height: 1.45;
+}
+.account .hint {
+  margin: 2px 0 0;
+}
+.rk-field {
+  font-variation-settings: var(--vs-column);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.rk-field::placeholder {
+  letter-spacing: 0.04em;
+  opacity: 0.5;
+}
+
+/* ---------------------------------------------------------------- the recovery key */
+
+.rk-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  overflow-y: auto;
+  background: var(--bg);
+  animation: rk-in 0.42s var(--ease) both;
+}
+.rk {
+  max-width: 440px;
+  min-height: 100%;
+  margin: 0 auto;
+  padding: calc(env(safe-area-inset-top) + 56px) 24px calc(env(safe-area-inset-bottom) + 28px);
+  display: flex;
+  flex-direction: column;
+}
+.rk h1 {
+  margin: 0;
+  font-variation-settings: var(--vs-hand);
+  font-size: 38px;
+  line-height: 1.05;
+  font-weight: 760;
+  letter-spacing: -0.025em;
+  color: var(--pen);
+}
+.rk-line {
+  margin: 14px 0 0;
+  font-size: 16.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.rk-key {
+  margin: 30px 0 0;
+  padding: 22px 20px;
+  display: grid;
+  grid-template-columns: repeat(4, auto);
+  justify-content: center;
+  gap: 12px 18px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow:
+    0 1px 0 rgba(21, 36, 44, 0.03),
+    0 12px 32px -18px rgba(21, 36, 44, 0.18);
+  font-variation-settings: var(--vs-column);
+  font-size: 22px;
+  font-weight: 560;
+  letter-spacing: 0.08em;
+  color: var(--ink);
+  user-select: all;
+  -webkit-user-select: all;
+  animation: rk-key 0.6s 0.08s var(--ease) both;
+}
+.rk-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin: 16px 0 0;
+}
+.rk .hint {
+  margin: 22px 0 0;
+  text-align: center;
+  line-height: 1.45;
+}
+.rk-foot {
+  margin-top: auto;
+  padding-top: 32px;
+  display: grid;
+  gap: 14px;
+}
+.rk-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 44px;
+  font-weight: 560;
+  cursor: pointer;
+}
+.rk-check input {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--pen);
+}
+@keyframes rk-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes rk-key {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rk-layer,
+  .rk-key {
+    animation: none;
+  }
+}
+@media (max-width: 380px) {
+  .rk-key {
+    font-size: 19px;
+    gap: 10px 13px;
+    padding: 18px 14px;
+  }
+}
+
+/* ---------------------------------------------------------------- settings */
+
+.sync-note {
+  margin: 14px 0 0;
+  padding: 12px 14px;
+  border-radius: var(--r-sm);
+  background: var(--mark);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.sync-note + .account {
+  margin-top: 12px;
+}
+.rk-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule);
+}
+.rk-row + .account {
+  margin-top: 12px;
+}

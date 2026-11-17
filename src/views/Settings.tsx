@@ -3,7 +3,7 @@ import { transactionsCSV } from '../lib/export'
 import { refreshRates } from '../lib/rates'
 import { accountsInOrder } from '../lib/accounts'
 import { addSource, changeBase, deleteSource, placeAccount, placeCurrency, placeSource, renameSource, restoreBackup, setTrackAccounts, settings, sources, unarchiveCategory, undoable, updateSettings } from '../lib/store'
-import { disableSync } from '../lib/sync'
+import { replaceRecoveryKey, signOut } from '../lib/signin'
 import { AccountForm, NO_AUTOFILL } from '../ui/account'
 import type { DB, Source } from '../lib/types'
 import { CurrencyPicker } from '../ui/currency'
@@ -373,12 +373,85 @@ function SyncBox() {
           class="pill sm"
           onClick={async () => {
             if (!confirm('Sign out on this device? Your data stays here')) return
-            await disableSync()
+            await signOut()
           }}
         >
           Sign out
         </button>
       </div>
+      {sync.legacy ? (
+        <>
+          <p class="sync-note">Money in Order now signs in with your cristianbagrin.com account. Enter your password once to move your budget over.</p>
+          <AccountForm email={sync.email} />
+        </>
+      ) : (
+        <RecoveryRow />
+      )}
     </Section>
+  )
+}
+
+/** Make a new recovery key (the old one stops working). Signs in again first when the session has ended. */
+function RecoveryRow() {
+  const [asking, setAsking] = useState(false)
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function run(pw?: string) {
+    setBusy(true)
+    const r = await replaceRecoveryKey(pw)
+    setBusy(false)
+    if (r.kind === 'password') return setAsking(true)
+    if (r.kind === 'fail') {
+      play('error')
+      return toast(r.message)
+    }
+    setAsking(false)
+    setPassword('')
+  }
+
+  return (
+    <>
+      <div class="rk-row">
+        <span class="grow">Recovery key</span>
+        <button
+          class="pill sm"
+          disabled={busy || asking}
+          onClick={() => {
+            if (confirm('Make a new recovery key? The one you have now stops working')) void run()
+          }}
+        >
+          {busy && !asking ? 'Making…' : 'Make a new one'}
+        </button>
+      </div>
+      {asking && (
+        <form
+          class="account"
+          noValidate
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (password) void run(password)
+          }}
+        >
+          <input
+            type="password"
+            name="password"
+            autocomplete="current-password"
+            aria-label="Password"
+            placeholder="Your password"
+            value={password}
+            onInput={(e) => setPassword(e.currentTarget.value)}
+          />
+          <div class="account-go">
+            <button type="submit" class="pill solid" disabled={busy || !password}>
+              {busy ? 'Making…' : 'Make a new one'}
+            </button>
+            <button type="button" class="pill sm" onClick={() => setAsking(false)}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+    </>
   )
 }

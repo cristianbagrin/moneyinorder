@@ -12,6 +12,7 @@ import { AccountsSheet } from './views/AccountsSheet'
 import { CategorySheet } from './views/CategorySheet'
 import { History } from './views/History'
 import { Onboarding } from './views/Onboarding'
+import { RecoveryKeyScreen } from './ui/account'
 import { Plan } from './views/Plan'
 import { Review } from './views/Review'
 import { Settings } from './views/Settings'
@@ -137,6 +138,7 @@ export function App() {
       <>
         <div class="statusbar" />
         <Onboarding onDone={() => setRoute(readRoute())} />
+        <RecoveryKeyScreen />
         <Toasts />
       </>
     )
@@ -202,6 +204,7 @@ export function App() {
       />
       <TxnSheet txn={txn} today={today} onClose={() => setTxn(null)} />
       <AccountsSheet open={accounts} count={counting} today={today} onClose={() => setAccounts(false)} />
+      <RecoveryKeyScreen />
       <Toasts />
     </div>
   )
@@ -242,7 +245,8 @@ function Rail(props: { route: Route; go: (r: Route) => void; today: string; onAc
   const b = useBadges(props.today)
   const total = useMemo(() => totalMoney(ix), [ix])
   const base = ix.settings.base
-  const stale = useSync().stale
+  const sync = useSync()
+  const stale = sync.stale || sync.legacy
   return (
     <aside class="rail">
       <div class="brand">
