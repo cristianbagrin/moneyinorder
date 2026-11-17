@@ -89,6 +89,33 @@ describe('the Worker', () => {
     expect(objects.size).toBe(0)
   })
 
+  it('retires a moved vault: one note, no more writes, and every pull hands out the note', async () => {
+    const note = (method: string, body?: string) => call(`/api/vault/${ID}/moved`, { method, body })
+    expect((await note('PUT', '{"v":1}')).status).toBe(404) // nothing to move yet
+    const first = await call(`/api/vault/${ID}`, { method: 'PUT', body: 'v1.a', headers: { 'X-Base-Rev': 'new' } })
+    const rev = first.headers.get('X-Rev')!
+    expect((await call(`/api/vault/${ID}`, { method: 'POST', body: 'v1.change' })).status).toBe(201)
+    expect((await note('GET')).status).toBe(404)
+    expect((await note('PUT', 'not json')).status).toBe(400)
+    expect((await note('PUT', '{' + 'x'.repeat(2000))).status).toBe(400)
+    expect((await note('PUT', '{"v":1,"iv":"a","ct":"b"}')).status).toBe(201)
+    expect((await note('PUT', '{"v":1,"iv":"c","ct":"d"}')).status).toBe(409)
+    expect(await (await note('GET')).text()).toBe('{"v":1,"iv":"a","ct":"b"}')
+    expect((await note('DELETE')).status).toBe(405)
+    expect((await call(`/api/account/${ID}/moved`)).status).toBe(404)
+
+    // The old data stays readable, and can't be changed or deleted any more.
+    const pulled = await (await call(`/api/vault/${ID}`, { headers: { 'X-Sync': '2' } })).json()
+    expect(pulled).toMatchObject({ rev, snap: 'v1.a', moved: '{"v":1,"iv":"a","ct":"b"}' })
+    expect(pulled.add).toHaveLength(1)
+    expect(await (await call(`/api/vault/${ID}`)).text()).toBe('v1.a')
+    expect((await call(`/api/vault/${ID}`, { method: 'PUT', body: 'v1.b', headers: { 'X-Base-Rev': rev } })).status).toBe(410)
+    expect((await call(`/api/vault/${ID}`, { method: 'POST', body: 'v1.more' })).status).toBe(410)
+    expect((await call(`/api/vault/${ID}`, { method: 'DELETE' })).status).toBe(410)
+    expect(countUnder('vaults/')).toBe(1)
+    expect(countUnder('vault-changes/')).toBe(1)
+  })
+
   it('limits requests per IP: 120 a minute for vaults, 30 for accounts', async () => {
     for (let i = 0; i < 30; i++) expect((await call(`/api/account/${ID}`)).status).toBe(404)
     const limited = await call(`/api/account/${ID}`)

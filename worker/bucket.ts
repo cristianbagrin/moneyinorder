@@ -7,7 +7,8 @@
 // One bucket holds what Netlify kept in three Blobs stores, under the same names as key prefixes:
 //   vaults/<vault id>                  the encrypted snapshot; customMetadata.rev is its revision
 //   vault-changes/<vault id>/<change>  encrypted changes on top of that snapshot
-//   accounts/<email hash>              "1": this email has an account
+//   accounts/<email hash>              "1": this email has an account (the old accounts, before the shared one)
+//   moved/<vault id>                   where an old account's budget moved (see worker/vault.ts)
 
 export interface StoredObject {
   key: string

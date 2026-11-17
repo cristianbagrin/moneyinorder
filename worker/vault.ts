@@ -15,13 +15,20 @@ import { ifNew, keysUnder, type Bucket, type StoredObject } from './bucket'
 // changes it folded in (X-Covers); only those are dropped, so a change appended meanwhile survives.
 // Clients that send X-Sync: 2 get the snapshot and changes they lack in one JSON reply; older clients
 // keep getting the bare snapshot.
+//
+// A vault from the old email-and-password accounts is retired once its budget has moved to the shared account
+// (see src/lib/signin.ts): the device that moved it leaves a note (`moved/<id>`, the new data key encrypted under
+// the old account's secret). From then on the vault takes no more writes (410) and every pull hands out the note,
+// so the account's other devices move too. The old snapshot and changes stay where they are.
 
 const MAX_BYTES = 4 * 1024 * 1024
+const MAX_NOTE = 1024
 /** A client that never folds changes into a snapshot is asked to (409) once this many are waiting. */
 const MAX_CHANGES = 100
 const CHANGE_ID = /^[0-9a-f]{16}$/
 
 const snapshotKey = (id: string) => `vaults/${id}`
+const movedKey = (id: string) => `moved/${id}`
 const changePrefix = (id: string) => `vault-changes/${id}/`
 
 async function changeIds(bucket: Bucket, id: string): Promise<string[]> {
@@ -67,7 +74,8 @@ export async function vault(req: Request, id: string, bucket: Bucket): Promise<R
             .map(async (c) => [c, await (await bucket.get(changePrefix(id) + c))?.text()] as const),
         )
       ).filter((e): e is readonly [string, string] => typeof e[1] === 'string')
-      const body = JSON.stringify({ rev: snapRev, changes, snap, add })
+      const moved = await (await bucket.get(movedKey(id)))?.text()
+      const body = JSON.stringify({ rev: snapRev, changes, snap, add, ...(moved ? { moved } : {}) })
       return new Response(body, { status: 200, headers: { 'Content-Type': 'application/json', ...noStore } })
     }
     if (rev && req.headers.get('X-Have-Rev') === rev) {
@@ -80,6 +88,10 @@ export async function vault(req: Request, id: string, bucket: Bucket): Promise<R
       status: 200,
       headers: { 'X-Rev': revOf(entry) ?? rev, 'Content-Type': 'text/plain', ...noStore },
     })
+  }
+
+  if ((req.method === 'PUT' || req.method === 'POST') && (await bucket.head(movedKey(id)))) {
+    return new Response('Moved', { status: 410, headers: noStore })
   }
 
   if (req.method === 'PUT') {
@@ -117,6 +129,7 @@ export async function vault(req: Request, id: string, bucket: Bucket): Promise<R
   }
 
   if (req.method === 'DELETE') {
+    if (await bucket.head(movedKey(id))) return new Response('Moved', { status: 410, headers: noStore })
     const changes = (await changeIds(bucket, id)).map((c) => changePrefix(id) + c)
     // R2 deletes at most 1000 keys per call; a vault never has more than MAX_CHANGES.
     if (changes.length) await bucket.delete(changes).catch(() => {})
@@ -124,5 +137,23 @@ export async function vault(req: Request, id: string, bucket: Bucket): Promise<R
     return new Response(null, { status: 204 })
   }
 
+  return new Response('Method not allowed', { status: 405 })
+}
+
+/** The note a moved vault leaves (see above): written once, never replaced. */
+export async function moved(req: Request, id: string, bucket: Bucket): Promise<Response> {
+  if (!/^[0-9a-f]{64}$/.test(id)) return new Response('Bad id', { status: 400 })
+  if (req.method === 'GET') {
+    const note = await (await bucket.get(movedKey(id)))?.text()
+    return note ? new Response(note, { status: 200, headers: { 'Content-Type': 'application/json', ...noStore } }) : new Response(null, { status: 404, headers: noStore })
+  }
+  if (req.method === 'PUT') {
+    const body = await req.text()
+    if (!body.startsWith('{') || body.length > MAX_NOTE) return new Response('Bad payload', { status: 400 })
+    // Only a vault that holds a budget moves.
+    if (!(await bucket.head(snapshotKey(id)))) return new Response(null, { status: 404, headers: noStore })
+    const written = await bucket.put(movedKey(id), body, { onlyIf: ifNew() })
+    return new Response(null, { status: written ? 201 : 409, headers: noStore })
+  }
   return new Response('Method not allowed', { status: 405 })
 }
