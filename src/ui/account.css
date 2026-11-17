@@ -28,13 +28,13 @@
 .account .hint {
   margin: 2px 0 0;
 }
-.rk-field {
+.account input.rk-field {
   font-variation-settings: var(--vs-column);
-  letter-spacing: 0.06em;
+  font-size: 16px;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 .rk-field::placeholder {
-  letter-spacing: 0.04em;
   opacity: 0.5;
 }
 

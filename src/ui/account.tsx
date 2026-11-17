@@ -305,7 +305,7 @@ export function RecoveryKeyScreen() {
             Download
           </button>
         </div>
-        <p class="hint">Without your password, this key or a signed-in device, synced data can’t be opened by anyone, us included.</p>
+        <p class="hint">Lose your password, this key and every signed-in device, and the synced data can’t be opened by anyone, us included.</p>
         <div class="rk-foot">
           <label class="rk-check">
             <input type="checkbox" checked={saved} onChange={(e) => setSaved(e.currentTarget.checked)} />

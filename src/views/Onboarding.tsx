@@ -78,7 +78,8 @@ export function Onboarding(props: { onDone: () => void }) {
           <AccountForm
             signInOnly
             onDone={() => {
-              if (!getDB().meta.settings?.ready) return
+              // Signed in to an account with no budget here yet: set one up (it syncs from the start).
+              if (!getDB().meta.settings?.ready) return setStep('setup')
               history.replaceState(null, '', '#/today')
               props.onDone()
             }}
