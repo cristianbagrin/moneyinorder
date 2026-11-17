@@ -34,20 +34,37 @@ Everything important can be undone for a few seconds (and with ⌘Z on a laptop)
 
 ## Sync and privacy
 
-Sync works with an account: an email and a password (Settings → Sync). The password never leaves your devices. From it they derive
+Sync works with the one account for all of Chris's apps (Chinese Brain, At Peace, Money in Order, Ten Dollar Words) at
+[account.cristianbagrin.com](https://account.cristianbagrin.com): an email and a password (Settings → Sync).
 
-- the account's **secret**: `PBKDF2-SHA256(password, salt = "money-in-order/account/" + email, 310,000 rounds)`,
-- a **vault id** (`SHA-256("money-in-order/id/" + secret)`) that names the blob on the server, and
-- an **AES-GCM key** (`SHA-256("money-in-order/key/" + secret)`) that encrypts it.
+- The password goes only to the account service, to be checked at sign-in. It stores a salted hash of it, never the
+  password, and never goes to Money in Order's server.
+- The budget is end-to-end encrypted. Each budget has a **data key**: 32 random bytes made on the first device.
+  The vault id (`SHA-256(HKDF(key, "mio/vault-id"))`) and the AES-256-GCM key that encrypts it (`HKDF(key, "mio/vault-key")`)
+  come from it, so neither server can read the budget.
+- The account keeps only a **keyring** for that key (the synced item `@mio/keyring`): the key encrypted under the
+  password (`PBKDF2-SHA256`, a random salt, 600,000 rounds) and under a **recovery key** (128 random bits, shown once as
+  26 characters; `HKDF(recovery key, "mio/recovery")`). Neither the account service nor this app's server has a key to the data.
+- Each signed-in device keeps the data key. If the password changes (reset or changed on the account page), those
+  devices keep syncing, and the next sign-in wraps the key under the new password. A new device then needs the
+  recovery key once. **Settings → Sync → Recovery key** makes a new one (the old one stops working).
+- With no password, no recovery key and no signed-in device, the synced data can't be opened by anyone. Each device
+  still has its full local data, and **Settings → Your data → Save backup** saves a file.
 
 The server (`worker/vault.ts`, a Cloudflare Worker over an R2 bucket) stores a gzip-then-encrypted snapshot per vault plus a short log of encrypted changes, and only ever sees ciphertext.
 An edit uploads only the records written since the device's last upload (a change of a few hundred bytes), and a device that syncs downloads only the changes it lacks.
 Merging is commutative and idempotent, so changes are appended without any locking; once 30 have piled up, the next device to upload folds them into a new snapshot.
-`worker/account.ts` only notes that a hash of an email has an account, so one email can't get two budgets and a sign-in can say "wrong password".
 Every snapshot write must name the revision it was based on, so two devices can't silently overwrite each other: the loser gets `412`, pulls, merges and retries.
 Records carry an update timestamp and tombstones, and merging keeps the newest version of each record, so devices converge whatever order they sync in.
 
-There is no password reset: the server can't decrypt anything, so a forgotten password means losing the synced copy (each device still has its full local data, and **Settings → Your data → Save backup** saves a file).
+**Moving from the old Money in Order accounts.** Before the shared account, the app had its own: the password,
+stretched with PBKDF2 (the email as salt), was the budget's secret. Signing in with the old email and password
+(or, on a device still signed in, the shared account's password) moves the budget: the old vault is read and decrypted,
+merged with this device's unsent edits, encrypted under a new data key into a new vault and **read back to check every
+record is there**. Only then is the old vault retired: a note beside it (`moved/<id>`, the new key encrypted under the
+old secret) makes it refuse writes (`410`) and tells the account's other devices where the budget went, so they move on
+their own with their own unsent edits. The old data stays on the server (`worker/account.ts` still answers whether an
+email had an old account). If the shared account already exists with another password, the app asks for it.
 Devices that synced with a 20-character code before accounts existed keep syncing until they sign in.
 
 ## Development
@@ -58,6 +75,15 @@ npm run dev          # UI only, no sync endpoint
 npm test             # budget math, targets, counting, merge, tabs and sync, and a randomized stress test
 STRESS_SEEDS=80 STRESS_STEPS=400 npm test   # the stress test, much harder
 npm run serve        # build + wrangler dev (the real Worker, local R2): sync works between tabs on http://localhost:4174
+MIO_API=http://127.0.0.1:4174 npm run dev   # the UI with sync against that Worker
+```
+
+On `localhost`, `localStorage['mio-account-api'] = 'http://127.0.0.1:8791/api'` points sign-in at a local copy of the
+account service (`npx wrangler dev --port 8791` in the chinesebrain repo's `site/`). The end-to-end test runs both:
+
+```sh
+npx wrangler dev --port 8791 --var MAIL_API:http://127.0.0.1:8792/emails --var RESEND_API_KEY:test   # in chinesebrain site/
+E2E_APP=http://127.0.0.1:4174 E2E_ACCOUNT=http://127.0.0.1:8791/api E2E_MAIL_PORT=8792 npx vitest run tests/e2e
 ```
 
 Code map:
@@ -68,6 +94,7 @@ Code map:
 - `src/lib/compare.ts`, `src/lib/insights.ts`: Review's figures (a month against its usual, savings, goals)
 - `src/lib/store.ts`: data, undo and every mutation; `src/lib/persist.ts`: IndexedDB, safe across tabs and reloads
 - `src/lib/sync.ts`: encryption and the pull/merge/push loop; `src/lib/merge.ts`: the record merge
+- `src/lib/keys.ts`: the data key, keyring and recovery key; `src/lib/account.ts`: the shared account; `src/lib/signin.ts`: sign-in, recovery and the move from the old accounts
 - `src/lib/export.ts`: the Claude summary and CSV
 - `src/views/*`: screens; `src/styles.css`: the whole design system
 
