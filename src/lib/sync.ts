@@ -1,15 +1,17 @@
-// End-to-end encrypted sync. The server stores one opaque blob per account and never sees the key.
+// End-to-end encrypted sync. The server stores one opaque blob per budget and never sees the key.
 //
-// An account is an email and a password. The password, stretched with PBKDF2 (the email is the salt),
-// becomes the account's secret; the vault id and the encryption key are derived from that secret, so
-// the server never sees the password, the secret or the data. Budgets synced before accounts existed
-// used a random 20-character code in place of the secret, and keep working until the device signs in.
+// A budget has a data key (see keys.ts), kept on each signed-in device and, wrapped, in the keyring of the
+// shared account (see signin.ts). The vault id and the encryption key are derived from it, so the server never
+// sees a password, a key or the data. Two older kinds of secret still sync until their device signs in again:
+// the old Money in Order accounts' secret (PBKDF2 of the password, the email as salt) and, from before accounts,
+// a random 20-character code. An old account's vault, once moved, tells its devices where it went (see moveTo).
 //
 // The server keeps a snapshot of the budget plus a short log of changes (see worker/vault.ts).
 // An edit uploads only the records written since this device's last upload; now and then a device folds
 // the log into a new snapshot. Records merge commutatively and idempotently, so the log needs no locking.
 
 import { get, set, update } from 'idb-keyval'
+import { codeOf, dkOf, hex, openMoved, vaultKeys } from './keys'
 import { hasNews, merge } from './merge'
 import { dbEpoch, getDB, onLocalChange, persistNow, pullNow, replaceDB, swapDB } from './store'
 import { COLLECTIONS, emptyDB, type DB, type Rec } from './types'
@@ -31,11 +33,17 @@ const OVERLAP = 60 * 1000
 
 export type SyncState = 'off' | 'idle' | 'syncing' | 'offline' | 'error'
 
-interface SyncConfig {
-  /** the account's secret (or, from before accounts, a sync code) */
+export interface SyncConfig {
+  /** the budget's data key (`dk1.` + base64), or an old account's secret, or (from before accounts) a sync code */
   code: string
   /** the account's email; missing for a sync code */
   email?: string
+  /** the shared account's session (missing on a device that moved on its own, or after it was signed out) */
+  token?: string
+  /** the keyring's `created`: which keyring this device's data key belongs to */
+  ring?: number
+  /** a recovery key just made here, shown until the person says they saved it */
+  pending?: string
   rev: string | null
   /** local edits not yet uploaded */
   dirty: boolean
@@ -54,7 +62,7 @@ interface SyncConfig {
   full?: boolean
 }
 
-interface VaultReply {
+export interface VaultReply {
   rev: string
   /** every change in the server's log */
   changes: string[]
@@ -62,6 +70,8 @@ interface VaultReply {
   snap?: string
   /** the changes this device hasn't got */
   add: [string, string][]
+  /** an old account's vault that has moved: the new data key, for the old secret (see worker/vault.ts) */
+  moved?: string
 }
 
 let cfg: SyncConfig | null = null
@@ -84,6 +94,10 @@ export function syncStatus() {
     error: errorMsg,
     code: cfg?.code ?? null,
     email: cfg?.email ?? null,
+    /** signed in to an old Money in Order account: syncs, but should sign in to the shared account */
+    legacy: !!cfg?.email && !dkOf(cfg.code),
+    /** a recovery key waiting to be saved */
+    pending: cfg?.pending ?? null,
     last: cfg?.last ?? 0,
     dirty: cfg?.dirty ?? false,
     /** sync is on but changes made here haven't reached the server for a while */
@@ -131,23 +145,24 @@ export function validEmail(s: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(s))
 }
 
-const hex = (b: ArrayBuffer) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('')
-
-/** The account's secret, from its password. Slow on purpose, so a password can't be guessed quickly. */
-async function accountSecret(email: string, password: string): Promise<string> {
+/** An old account's secret, from its password. Slow on purpose, so a password can't be guessed quickly. */
+export async function legacySecret(email: string, password: string): Promise<string> {
   const enc = new TextEncoder()
   const pw = await crypto.subtle.importKey('raw', enc.encode(password.normalize('NFC')), 'PBKDF2', false, ['deriveBits'])
   const salt = enc.encode('money-in-order/account/' + normalizeEmail(email))
   return hex(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: ROUNDS }, pw, 256))
 }
 
-/** Where the server notes that an email has an account (a hash: the server never sees the email). */
-async function emailUrl(email: string): Promise<string> {
+/** Where the server noted that an email has an old account (a hash: the server never sees the email). */
+export async function legacyEmailUrl(email: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('money-in-order/email/' + normalizeEmail(email)))
   return `/api/account/${hex(digest)}`
 }
 
-async function derive(code: string) {
+/** The vault's id and key for a sync config's code. */
+export async function derive(code: string): Promise<{ id: string; key: CryptoKey }> {
+  const dk = dkOf(code)
+  if (dk) return vaultKeys(dk)
   const enc = new TextEncoder()
   const raw = enc.encode(code.replace(/-/g, ''))
   const idHash = await crypto.subtle.digest('SHA-256', new Uint8Array([...enc.encode('money-in-order/id/'), ...raw]))
@@ -174,7 +189,7 @@ async function pipe(data: Uint8Array, stream: CompressionStream | DecompressionS
   return new Uint8Array(await out.arrayBuffer())
 }
 
-async function seal(db: DB, key: CryptoKey): Promise<string> {
+export async function seal(db: DB, key: CryptoKey): Promise<string> {
   const json = new TextEncoder().encode(JSON.stringify({ v: 1, db }))
   const packed = await pipe(json, new CompressionStream('gzip'))
   const iv = crypto.getRandomValues(new Uint8Array(12))
@@ -207,7 +222,7 @@ function changedSince(db: DB, since: number) {
 }
 
 /** Ask for what the server has that this device lacks. */
-function pullVault(id: string, c?: SyncConfig): Promise<Response> {
+export function pullVault(id: string, c?: SyncConfig): Promise<Response> {
   const headers: Record<string, string> = { 'X-Sync': '2' }
   if (c?.rev) {
     headers['X-Have-Rev'] = c.rev
@@ -217,7 +232,7 @@ function pullVault(id: string, c?: SyncConfig): Promise<Response> {
 }
 
 /** The snapshot and changes in a reply, merged (null when it brought nothing). */
-async function openReply(r: VaultReply, key: CryptoKey): Promise<DB | null> {
+export async function openReply(r: VaultReply, key: CryptoKey): Promise<DB | null> {
   const parts = await Promise.all([...(r.snap ? [r.snap] : []), ...r.add.map((a) => a[1])].map((b) => open(b, key)))
   return parts.length ? parts.reduce(merge) : null
 }
@@ -301,6 +316,15 @@ async function syncOnce(): Promise<void> {
         }
         c.rev = reply.rev
         c.seen = reply.changes
+        // An old account's budget moved to the shared account: follow it, with everything this device has.
+        if (reply.moved && c.email && !dkOf(c.code)) {
+          const dk = await openMoved(reply.moved, c.code)
+          if (gone()) return
+          if (dk) {
+            await moveTo(c, dk)
+            return
+          }
+        }
       } else if (res.status === 404) {
         c.rev = null
         c.seen = []
@@ -330,6 +354,7 @@ async function syncOnce(): Promise<void> {
           signal: AbortSignal.timeout(30_000),
         })
         if (gone()) return
+        if (post.status === 410) continue // the vault moved: the next pull says where
         if (post.status === 404 || post.status === 409) {
           c.full = true // the snapshot is gone, or the log is full: send everything
           continue
@@ -344,7 +369,7 @@ async function syncOnce(): Promise<void> {
           signal: AbortSignal.timeout(30_000),
         })
         if (gone()) return
-        if (put.status === 412) continue // someone else wrote first: pull, merge, try again
+        if (put.status === 412 || put.status === 410) continue // someone else wrote first (or it moved): pull, merge, try again
         if (!put.ok) throw new ServerError(String(put.status))
         c.rev = put.headers.get('X-Rev')
         c.seen = []
@@ -442,9 +467,9 @@ export function syncIdle(): Promise<void> {
 }
 
 /** Start syncing under a secret. Local data is merged with whatever is stored under it. */
-export async function enableSync(code: string, email?: string) {
+export async function enableSync(code: string, email?: string, extra: Pick<SyncConfig, 'token' | 'ring' | 'pending'> = {}) {
   const k = await derive(code)
-  cfg = { code, email, rev: null, dirty: true, since: Date.now(), last: 0, epoch: dbEpoch() }
+  cfg = { code, email, ...extra, rev: null, dirty: true, since: Date.now(), last: 0, epoch: dbEpoch() }
   keys = k
   await storeCfg()
   wire()
@@ -452,14 +477,25 @@ export async function enableSync(code: string, email?: string) {
   await syncNow()
 }
 
+/** An old account's devices follow its budget to the data key it moved to, uploading everything they have. */
+async function moveTo(c: SyncConfig, dk: Uint8Array) {
+  const code = codeOf(dk)
+  const k = await derive(code)
+  if (cfg !== c) return
+  cfg = { code, email: c.email, rev: null, seen: [], dirty: true, full: true, since: c.since ?? Date.now(), last: c.last, epoch: c.epoch }
+  keys = k
+  await storeCfg()
+  again = true
+}
+
 /** Take the budget stored under a secret as it is: this device's own data is replaced, so two budgets never get mixed. */
-async function adopt(code: string, email: string | undefined, res: Response, k: Awaited<ReturnType<typeof derive>>) {
-  const reply = (await res.json()) as VaultReply
+export async function adopt(code: string, email: string | undefined, reply: VaultReply, extra: Pick<SyncConfig, 'token' | 'ring' | 'pending'> = {}) {
+  const k = await derive(code)
   const mark = Date.now()
   const remote = (await openReply(reply, k.key)) ?? emptyDB()
   // A different budget, not a merge: other tabs drop the old one instead of merging it back in.
   swapDB(remote)
-  cfg = { code, email, rev: reply.rev, seen: reply.changes, mark, dirty: false, last: Date.now(), epoch: dbEpoch() }
+  cfg = { code, email, ...extra, rev: reply.rev, seen: reply.changes, mark, dirty: false, last: Date.now(), epoch: dbEpoch() }
   keys = k
   await storeCfg()
   await persistNow()
@@ -467,56 +503,35 @@ async function adopt(code: string, email: string | undefined, res: Response, k: 
   setState('idle')
 }
 
-/**
- * Create an account with this device's budget. An email that already has an account is refused, so
- * nobody ends up with two budgets under one email.
- */
-export async function signUp(email: string, password: string): Promise<'created' | 'exists' | 'error'> {
-  try {
-    const secret = await accountSecret(email, password)
-    const k = await derive(secret)
-    const url = await emailUrl(email)
-    const [vault, known] = await Promise.all([
-      fetch(`/api/vault/${k.id}`, { method: 'HEAD', cache: 'no-store' }),
-      fetch(url, { method: 'HEAD', cache: 'no-store' }),
-    ])
-    if (vault.status === 200 || known.status === 200) return 'exists'
-    if (vault.status !== 404 || known.status !== 404) return 'error'
-    const put = await fetch(url, { method: 'PUT' })
-    if (put.status === 409) return 'exists'
-    if (!put.ok) return 'error'
-    await enableSync(secret, normalizeEmail(email))
-    return 'created'
-  } catch {
-    return 'error'
-  }
+/** Sync under a secret, taking what is stored under it in place of this device's budget (as a sign-in does). */
+export async function join(
+  code: string,
+  email: string,
+  replace: () => boolean = () => true,
+  extra: Pick<SyncConfig, 'token' | 'ring' | 'pending'> = {},
+): Promise<'joined' | 'cancelled' | 'empty' | 'error'> {
+  const k = await derive(code)
+  const res = await pullVault(k.id)
+  if (res.status === 404) return 'empty'
+  if (!res.ok) return 'error'
+  const reply = (await res.json()) as VaultReply
+  if (!replace()) return 'cancelled'
+  await adopt(code, email, reply, extra)
+  return 'joined'
 }
 
-/**
- * Sign in on this device: the account's budget replaces what is here, once `replace` agrees (it is
- * asked only when the email and password are right).
- */
-export async function signIn(
-  email: string,
-  password: string,
-  replace: () => boolean = () => true,
-): Promise<'joined' | 'cancelled' | 'wrong' | 'none' | 'error'> {
-  try {
-    const secret = await accountSecret(email, password)
-    if (cfg?.code === secret) return 'joined'
-    const k = await derive(secret)
-    const res = await pullVault(k.id)
-    if (res.status === 404) {
-      const known = await fetch(await emailUrl(email), { method: 'HEAD', cache: 'no-store' })
-      return known.status === 200 ? 'wrong' : known.status === 404 ? 'none' : 'error'
-    }
-    if (!res.ok) return 'error'
-    if (!replace()) return 'cancelled'
-    await adopt(secret, normalizeEmail(email), res, k)
-    return 'joined'
-  } catch {
-    return 'error'
-  }
+/** The sync settings as they are now (a copy). */
+export function syncConfig(): Readonly<SyncConfig> | null {
+  return cfg ? { ...cfg } : null
+}
+
+/** Change the account details kept with the sync settings (session, keyring, pending recovery key). */
+export async function updateAccount(patch: Pick<SyncConfig, 'token' | 'ring' | 'pending' | 'email'>) {
+  if (!cfg) return
+  cfg = { ...cfg, ...patch }
+  for (const k of Object.keys(patch) as (keyof typeof patch)[]) if (patch[k] === undefined) delete cfg[k]
+  await storeCfg()
+  notify()
 }
 
 /** Stop syncing on this device. Its data stays here. */
@@ -526,3 +541,4 @@ export async function disableSync() {
   await storeCfg()
   setState('off')
 }
+

@@ -195,6 +195,7 @@ describe('a budget swapped in one tab', () => {
 
 describe('sync state shared by the tabs of a device', () => {
   const X = 'ABCDE-FGHJK-MNPQR-STUVW'
+  const B = 'dk1.' + btoa('b'.repeat(32))
 
   it('turning sync on or off in one tab holds in the others', async () => {
     seed('laptop3', budget('A'))
@@ -218,7 +219,7 @@ describe('sync state shared by the tabs of a device', () => {
     seed('phone', budget('B'))
     const phone = await tab('phone')
     await phone.sync.initSync()
-    expect(await phone.sync.signUp('B@example.com ', 'password-b')).toBe('created')
+    await phone.sync.enableSync(B, 'b@example.com')
     // The laptop syncs budget A under code X in two tabs.
     seed('laptop4', budget('A'))
     const t1 = await tab('laptop4')
@@ -227,7 +228,7 @@ describe('sync state shared by the tabs of a device', () => {
     await t2.sync.initSync()
     await t1.sync.enableSync(X)
     await t2.sync.syncNow()
-    expect(await t1.sync.signIn('b@example.com', 'password-b')).toBe('joined')
+    expect(await t1.sync.join(B, 'b@example.com')).toBe('joined')
     // Tab 2 logs to the old budget before it has heard of the sign-in, then syncs.
     t2.S.commit({ txns: [txn('late', 'cA')] })
     await t2.sync.syncNow()
@@ -242,22 +243,21 @@ describe('sync state shared by the tabs of a device', () => {
   })
 })
 
-describe('accounts', () => {
-  it('one account per email; a wrong password or an unknown email is told apart', async () => {
+describe('joining a budget', () => {
+  it('asks before replacing this device’s budget; an empty vault is told apart; signing out keeps the data', async () => {
+    const C = 'dk1.' + btoa('c'.repeat(32))
     seed('acct1', budget('C'))
     const a = await tab('acct1')
     await a.sync.initSync()
-    expect(await a.sync.signUp('c@example.com', 'correct horse')).toBe('created')
+    await a.sync.enableSync(C, 'c@example.com')
     expect(a.sync.syncStatus()).toMatchObject({ email: 'c@example.com', state: 'idle', dirty: false })
     seed('acct2', budget('D'))
     const b = await tab('acct2')
     await b.sync.initSync()
-    expect(await b.sync.signUp('C@example.com', 'another one')).toBe('exists')
-    expect(await b.sync.signIn('c@example.com', 'wrong horse')).toBe('wrong')
-    expect(await b.sync.signIn('nobody@example.com', 'correct horse')).toBe('none')
-    expect(await b.sync.signIn('c@example.com', 'correct horse', () => false)).toBe('cancelled')
+    expect(await b.sync.join('dk1.' + btoa('n'.repeat(32)), 'n@example.com')).toBe('empty')
+    expect(await b.sync.join(C, 'c@example.com', () => false)).toBe('cancelled')
     expect(ids(b.S.getDB())).toEqual(['tD'])
-    expect(await b.sync.signIn('c@example.com', 'correct horse')).toBe('joined')
+    expect(await b.sync.join(C, 'c@example.com')).toBe('joined')
     expect(ids(b.S.getDB())).toEqual(['tC'])
     await b.sync.disableSync()
     expect(b.sync.syncStatus().email).toBe(null)

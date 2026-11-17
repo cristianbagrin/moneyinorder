@@ -994,7 +994,8 @@ function algebraProblems(dbs: DB[], r: Rand): string[] {
 // ---------------------------------------------------------------- one run
 
 const EMAIL = 'fuzz@example.com'
-const PASSWORD = 'correct horse battery'
+/** an old account's secret (the fake crypto here has no HKDF for a data key; both name a vault the same way) */
+const SECRET = 'f'.repeat(64)
 
 function reset(seed: number) {
   R = new Rand(mulberry(seed))
@@ -1043,7 +1044,7 @@ async function setup(): Promise<string> {
     a.S.addAccount('Bank', 'TWD')
     a.S.addAccount('Cash', 'TWD')
     a.S.clearUndo()
-    expect(await a.sync.signUp(EMAIL, PASSWORD)).toBe('created')
+    await a.sync.enableSync(SECRET, EMAIL)
   })
   const code = a.sync.syncStatus().code!
   if (R.chance(0.5)) await openTab(first)
@@ -1057,7 +1058,7 @@ async function setup(): Promise<string> {
         t1.S.seedCategories()
         t1.S.addTxn({ date: `${monthOf(t1.S.today())}-02`, cat: RTA, amt: 500_000, cur: 'TWD' })
       }
-      if (join === 'signIn') expect(await t1.sync.signIn(EMAIL, PASSWORD)).toBe('joined')
+      if (join === 'signIn') expect(await t1.sync.join(code, EMAIL)).toBe('joined')
       else await t1.sync.enableSync(code, EMAIL)
     })
     note(`${d.name} joined by ${join}`)
