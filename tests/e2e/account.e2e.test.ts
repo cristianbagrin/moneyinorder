@@ -192,6 +192,11 @@ describe.skipIf(!APP || !ACCOUNT)('end to end, both Workers running locally', ()
     const budget = bigDB({ from: '2024-01', months: 24, seed: 11 })
     // An old Money in Order account, made as the previous version did.
     const phone = await device(budget)
+    // The budget as the app holds it (loading it fills in what the fixture leaves out).
+    const start = count(phone.S.getDB())
+    const startIds = COLLECTIONS.flatMap((c) => Object.keys(phone.S.getDB()[c]).map((id) => `${c}/${id}`))
+    // Every record the old budget had, and the app may add its own as time passes (this month's plan, say).
+    const holdsAll = (db: DB) => startIds.every((k) => !!(db as unknown as Record<string, Record<string, unknown>>)[k.split('/')[0]][k.slice(k.indexOf('/') + 1)])
     const secret = await on(phone, async () => {
       const s = await phone.sync.legacySecret(who, 'old password')
       expect((await fetch(await phone.sync.legacyEmailUrl(who), { method: 'PUT' })).status).toBe(201)
@@ -216,7 +221,8 @@ describe.skipIf(!APP || !ACCOUNT)('end to end, both Workers running locally', ()
     expect(phone.sync.syncStatus()).toMatchObject({ state: 'idle', dirty: false, legacy: false })
     const after = phone.S.getDB()
     expect(after.txns.laptopEdit && after.txns.phoneUnsent).toBeTruthy()
-    expect(count(after)).toBe(count(budget) + 2)
+    expect(holdsAll(after)).toBe(true)
+    expect(count(after)).toBeGreaterThanOrEqual(start + 2)
 
     // The old vault is retired, not gone.
     const old = await (await fetch(`${APP}/api/vault/${oldId}`, { headers: { 'X-Sync': '2' } })).json()
@@ -237,7 +243,8 @@ describe.skipIf(!APP || !ACCOUNT)('end to end, both Workers running locally', ()
     expect((await on(tablet, () => tablet.signin.signIn(who, 'old password'))).kind).toBe('done')
     expect(records(tablet.S.getDB())).toBe(records(phone.S.getDB()))
     expect(records(tablet.S.getDB())).toBe(records(laptop.S.getDB()))
-    expect(count(tablet.S.getDB())).toBe(count(budget) + 3)
+    expect(holdsAll(tablet.S.getDB())).toBe(true)
+    expect(count(tablet.S.getDB())).toBeGreaterThanOrEqual(start + 3)
   })
 
   it('migrates when the shared account already exists with another password', async () => {
