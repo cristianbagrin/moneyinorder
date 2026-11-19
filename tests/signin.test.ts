@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import worker, { type Env } from '../worker/index'
 import { emptyDB, type DB, type Txn } from '../src/lib/types'
 import { accounts, accountService, ACCOUNT_API, resetPassword } from './fake-account'
@@ -81,6 +81,23 @@ beforeAll(() => {
     if (url.startsWith(ACCOUNT_API)) return accountService(url, init)
     return worker.fetch(new Request('http://local' + url, init), workerEnv)
   })
+})
+
+// Every device here is a fresh copy of the modules sharing one process, so a sync one test leaves scheduled
+// would fire during the next test, with that test's device storage. Real devices never share like this.
+const realSetTimeout = globalThis.setTimeout
+const scheduled = new Set<ReturnType<typeof setTimeout>>()
+globalThis.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...a: unknown[]) => {
+  const t = realSetTimeout(() => {
+    scheduled.delete(t)
+    fn(...a)
+  }, ms)
+  scheduled.add(t)
+  return t
+}) as typeof setTimeout
+afterEach(() => {
+  for (const t of scheduled) clearTimeout(t)
+  scheduled.clear()
 })
 
 beforeEach(() => {
