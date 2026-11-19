@@ -23,7 +23,7 @@ export const NO_AUTOFILL = {
 
 export const ACCOUNT_PAGE = 'https://account.cristianbagrin.com'
 
-type Ask = 'account-password' | 'old-password' | 'recovery'
+type Ask = 'account-password' | 'old-password' | 'recovery' | 'old-recovery'
 
 /**
  * Sign in with the shared account (or create it), with the budget on this device. A real form with the fields
@@ -52,12 +52,13 @@ export function AccountForm(props: { signInOnly?: boolean; email?: string; onDon
     if (step.kind === 'done') {
       setAsk(null)
       play('success')
-      if (!step.recovery) toast(creating ? 'Account created. Your budget syncs now' : 'Signed in')
+      if (step.covered) toast('Signed in. Your account’s recovery key covers Money in Order now')
+      else if (!step.recovery) toast(creating ? 'Account created. Your budget syncs now' : 'Signed in')
       props.onDone?.()
     } else if (step.kind === 'exists') fail('There’s already an account for this email. Sign in instead')
     else if (step.kind === 'fail') fail(step.message)
     else if (step.kind === 'cancelled') setAsk(null)
-    else setAsk(step.kind)
+    else setAsk(step.kind === 'recovery' && step.old ? 'old-recovery' : step.kind)
   }
 
   async function submit(e: Event) {
@@ -78,7 +79,11 @@ export function AccountForm(props: { signInOnly?: boolean; email?: string; onDon
         ask={ask}
         onAnswer={async (answer) => {
           const step =
-            ask === 'account-password' ? await withAccountPassword(answer!) : ask === 'old-password' ? await withOldPassword(answer) : await withRecoveryKey(answer!)
+            ask === 'account-password'
+              ? await withAccountPassword(answer!)
+              : ask === 'old-password'
+                ? await withOldPassword(answer)
+                : await withRecoveryKey(answer!)
           after(step)
         }}
         onBack={() => {
@@ -161,7 +166,12 @@ const ASK: Record<Ask, { line: string; label: string; go: string }> = {
     go: 'Continue',
   },
   recovery: {
-    line: 'Your password changed. Enter your recovery key to unlock your synced data.',
+    line: 'Your password changed. Enter your cristianbagrin.com recovery key to unlock your synced data.',
+    label: 'Recovery key',
+    go: 'Unlock',
+  },
+  'old-recovery': {
+    line: 'Your budget still uses the recovery key Money in Order gave you before. Enter it once.',
     label: 'Recovery key',
     go: 'Unlock',
   },
@@ -174,7 +184,7 @@ function Followup(props: { ask: Ask; onAnswer: (answer: string | null) => Promis
   const [lost, setLost] = useState(false)
   const field = useRef<HTMLInputElement>(null)
   const a = ASK[props.ask]
-  const key = props.ask === 'recovery'
+  const key = props.ask === 'recovery' || props.ask === 'old-recovery'
   useEffect(() => field.current?.focus(), [props.ask])
 
   async function answer(v: string | null) {
@@ -269,20 +279,21 @@ export function RecoveryKeyScreen() {
 
   function download() {
     const text = [
-      'Money in Order recovery key',
+      'cristianbagrin.com recovery key',
       '',
       key,
       '',
       `Account: ${sync.email ?? ''}`,
       `Made: ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`,
       '',
-      'If you forget your password, this key is the only way back into your synced data.',
+      'One key for your cristianbagrin.com account, in every app.',
+      'If you forget your password, it’s the only way back into your synced data.',
       'Keep it somewhere safe, like a password manager.',
       '',
     ].join('\n')
     const a = document.createElement('a')
     a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }))
-    a.download = 'Money in Order recovery key.txt'
+    a.download = 'cristianbagrin.com recovery key.txt'
     a.click()
     setTimeout(() => URL.revokeObjectURL(a.href), 1000)
   }
@@ -291,7 +302,11 @@ export function RecoveryKeyScreen() {
     <div class="rk-layer" role="dialog" aria-modal="true" aria-labelledby="rk-title">
       <div class="rk">
         <h1 id="rk-title">Save your recovery key</h1>
-        <p class="rk-line">If you forget your password, this key is the only way back into your synced data. Keep it somewhere safe, like a password manager.</p>
+        <p class="rk-line">
+          One key for your cristianbagrin.com account, in every app. If you forget your password, it’s the only way back into your synced data. Keep it
+          somewhere safe, like a password manager.
+        </p>
+        {sync.replaced && <p class="rk-line">It replaces the recovery keys Money in Order and Ten Dollar Words gave you before.</p>}
         <div class="rk-key" aria-label="Recovery key">
           {key.split('-').map((g, i) => (
             <span key={i}>{g}</span>

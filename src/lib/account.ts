@@ -1,8 +1,9 @@
-// The one account for all of Chris's apps, at account.cristianbagrin.com: sign-in, and this app's keyring
-// (the only thing Money in Order keeps there; the budget itself stays in this app's own vault).
+// The one account for all of Chris's apps, at account.cristianbagrin.com: sign-in, this app's keyring and the
+// account's own (the only things Money in Order keeps there; the budget itself stays in this app's own vault).
 // The password goes only here, to be checked; it never goes to Money in Order's server.
 
-import { APP, isKeyring, KEYRING, type Keyring } from './keys'
+import { isAccountRing, type AccountRing } from './account-keyring'
+import { APP, isAnyRing, KEYRING, type AnyRing } from './keys'
 
 const DEFAULT_API = 'https://account.cristianbagrin.com/api'
 let api: string | null = null
@@ -67,26 +68,45 @@ export const login = (email: string, password: string) => call<Session>('login',
 export const signup = (email: string, password: string) => call<Session>('signup', { email, password })
 export const logout = (token: string) => call<object>('logout', {}, token)
 
-type Item = { k: string; v: unknown; t: number }
+type Item = { k: string; v: unknown; t: number; s?: number }
+type SyncReply = { changes?: Item[]; rejected?: string[] }
 
-/** This app's keyring in the account, and when it was last written (the account keeps the newest write). */
-export async function readKeyring(token: string): Promise<Ok<{ ring: Keyring | null; t: number }> | Fail> {
-  const r = await call<{ changes: Item[] }>('sync', { app: APP, since: 0, changes: [] }, token)
+/** An item of `app` as the account holds it: its value, and the `s` a write over it must name. */
+async function readItem(token: string, app: string, k: string): Promise<Ok<{ v: unknown; s: number; t: number }> | Fail> {
+  const r = await call<SyncReply>('sync', { app, since: 0, changes: [] }, token)
   if (!r.ok) return r
-  const item = (r.changes ?? []).find((c) => c.k === KEYRING)
-  return { ok: true, ring: isKeyring(item?.v) ? item.v : null, t: item?.t ?? 0 }
+  const item = (r.changes ?? []).find((c) => c.k === k)
+  return { ok: true, v: item?.v ?? null, s: item?.s ?? 0, t: item?.t ?? 0 }
 }
 
 /**
- * Write the keyring over the one written at `after` (a write stamped older than what's stored would be dropped),
- * then read it back: what the account holds now, which is someone else's if another device wrote one meanwhile.
+ * Write an item over the one read at `s` (0: none). The account refuses it when anything changed it since, so two
+ * devices or apps never write over each other: `written` says whether this write landed.
  */
-export async function writeKeyring(token: string, ring: Keyring, after: number): Promise<Ok<{ ring: Keyring | null; t: number }> | Fail> {
-  const w = await call<object>('sync', { app: APP, since: 0, changes: [{ k: KEYRING, v: ring, t: Math.max(Date.now(), after + 1) }] }, token)
-  if (!w.ok) return w
-  return readKeyring(token)
+async function writeItem(token: string, app: string, k: string, v: unknown, s: number): Promise<Ok<{ written: boolean }> | Fail> {
+  const r = await call<SyncReply>('sync', { app, since: 0, changes: [{ k, v, t: Date.now(), if: s }] }, token)
+  if (!r.ok) return r
+  return { ok: true, written: !(r.rejected ?? []).includes(k) }
 }
 
-/** The same keyring (the account stores it as canonical JSON, so compare the parts that matter). */
-export const sameKeyring = (a: Keyring | null, b: Keyring | null) =>
-  !!a && !!b && a.created === b.created && a.salt === b.salt && a.pw.ct === b.pw.ct && a.rk.ct === b.rk.ct
+export type RingRead = Ok<{ ring: AnyRing | null; s: number }>
+
+/** This app's keyring in the account (`ring` is null when there is none, or it is not one this version knows). */
+export async function readKeyring(token: string): Promise<RingRead | Fail> {
+  const r = await readItem(token, APP, KEYRING)
+  if (!r.ok) return r
+  return { ok: true, ring: isAnyRing(r.v) ? r.v : null, s: r.s }
+}
+
+export const writeKeyring = (token: string, ring: AnyRing, s: number) => writeItem(token, APP, KEYRING, ring, s)
+
+export const ACCOUNT_RING = '@account/keyring'
+
+/** The account's keyring (its master key), shared by every app. */
+export async function readAccountRing(token: string): Promise<Ok<{ ring: AccountRing | null; s: number }> | Fail> {
+  const r = await readItem(token, 'account', ACCOUNT_RING)
+  if (!r.ok) return r
+  return { ok: true, ring: isAccountRing(r.v) ? r.v : null, s: r.s }
+}
+
+export const writeAccountRing = (token: string, ring: AccountRing, s: number) => writeItem(token, 'account', ACCOUNT_RING, ring, s)

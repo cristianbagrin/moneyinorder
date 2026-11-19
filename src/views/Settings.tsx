@@ -3,7 +3,7 @@ import { transactionsCSV } from '../lib/export'
 import { refreshRates } from '../lib/rates'
 import { accountsInOrder } from '../lib/accounts'
 import { addSource, changeBase, deleteSource, placeAccount, placeCurrency, placeSource, renameSource, restoreBackup, setTrackAccounts, settings, sources, unarchiveCategory, undoable, updateSettings } from '../lib/store'
-import { replaceRecoveryKey, signOut } from '../lib/signin'
+import { replaceRecoveryKey, signOut, switchToAccountKeys } from '../lib/signin'
 import { AccountForm, NO_AUTOFILL } from '../ui/account'
 import type { DB, Source } from '../lib/types'
 import { CurrencyPicker } from '../ui/currency'
@@ -385,54 +385,76 @@ function SyncBox() {
           <AccountForm email={sync.email} />
         </>
       ) : (
-        <RecoveryRow />
+        <RecoveryRow key={String(sync.master)} switching={!sync.master} />
       )}
     </Section>
   )
 }
 
-/** Make a new recovery key (the old one stops working). Signs in again first when the session has ended. */
-function RecoveryRow() {
-  const [asking, setAsking] = useState(false)
+/**
+ * The account's recovery key, one for every app. A device signed in before Money in Order used it switches with the
+ * password once; then "Make a new one" replaces the account's key (the old one stops working everywhere). Either
+ * may need the password (the session ended) or, after a reset by email, the recovery key.
+ */
+function RecoveryRow(props: { switching: boolean }) {
+  const [asking, setAsking] = useState<'password' | 'recovery' | 'old-recovery' | null>(props.switching ? 'password' : null)
   const [password, setPassword] = useState('')
+  const [key, setKey] = useState('')
   const [busy, setBusy] = useState(false)
 
-  async function run(pw?: string) {
+  async function run(pw?: string, rk?: string) {
     setBusy(true)
-    const r = await replaceRecoveryKey(pw)
+    const r = props.switching ? await switchToAccountKeys(pw ?? '', rk) : await replaceRecoveryKey(pw, rk)
     setBusy(false)
-    if (r.kind === 'password') return setAsking(true)
+    if (r.kind === 'password') return setAsking('password')
+    if (r.kind === 'recovery') return setAsking(r.old ? 'old-recovery' : 'recovery')
     if (r.kind === 'fail') {
       play('error')
       return toast(r.message)
     }
-    setAsking(false)
+    setAsking(props.switching ? 'password' : null)
     setPassword('')
+    setKey('')
+    if (r.covered) toast('Your account’s recovery key covers Money in Order now')
+    else if (!r.recovery) toast('Done')
   }
 
+  const keyAsked = asking === 'recovery' || asking === 'old-recovery'
+  const go = props.switching ? 'Switch' : 'Make a new one'
   return (
     <>
-      <div class="rk-row">
-        <span class="grow">Recovery key</span>
-        <button
-          class="pill sm"
-          disabled={busy || asking}
-          onClick={() => {
-            if (confirm('Make a new recovery key? The one you have now stops working')) void run()
-          }}
-        >
-          {busy && !asking ? 'Making…' : 'Make a new one'}
-        </button>
-      </div>
+      {props.switching ? (
+        <p class="sync-note">Money in Order now uses your cristianbagrin.com account’s recovery key. Enter your password once to switch.</p>
+      ) : (
+        <div class="rk-row">
+          <span class="grow">Recovery key</span>
+          <button
+            class="pill sm"
+            disabled={busy || !!asking}
+            onClick={() => {
+              if (confirm('Make a new recovery key for your account? The one you have now stops working, in every app')) void run()
+            }}
+          >
+            {busy && !asking ? 'Making…' : 'Make a new one'}
+          </button>
+        </div>
+      )}
       {asking && (
         <form
           class="account"
           noValidate
           onSubmit={(e) => {
             e.preventDefault()
-            if (password) void run(password)
+            if (password && (!keyAsked || key.trim())) void run(password, keyAsked ? key : undefined)
           }}
         >
+          {keyAsked && (
+            <p class="account-ask">
+              {asking === 'recovery'
+                ? 'Your password changed. Enter your cristianbagrin.com recovery key too.'
+                : 'Your budget still uses the recovery key Money in Order gave you before. Enter it once.'}
+            </p>
+          )}
           <input
             type="password"
             name="password"
@@ -442,13 +464,28 @@ function RecoveryRow() {
             value={password}
             onInput={(e) => setPassword(e.currentTarget.value)}
           />
+          {keyAsked && (
+            <input
+              type="text"
+              name="recovery-key"
+              class="rk-field"
+              autocapitalize="characters"
+              aria-label="Recovery key"
+              placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX"
+              value={key}
+              onInput={(e) => setKey(e.currentTarget.value)}
+              {...NO_AUTOFILL}
+            />
+          )}
           <div class="account-go">
-            <button type="submit" class="pill solid" disabled={busy || !password}>
-              {busy ? 'Making…' : 'Make a new one'}
+            <button type="submit" class="pill solid" disabled={busy || !password || (keyAsked && !key.trim())}>
+              {busy ? (props.switching ? 'Switching…' : 'Making…') : go}
             </button>
-            <button type="button" class="pill sm" onClick={() => setAsking(false)}>
-              Cancel
-            </button>
+            {!props.switching && (
+              <button type="button" class="pill sm" onClick={() => setAsking(null)}>
+                Cancel
+              </button>
+            )}
           </div>
         </form>
       )}

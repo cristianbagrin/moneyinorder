@@ -2,14 +2,21 @@
 //
 // Each budget has a data key (DK): 32 random bytes made once, on the first device. The vault's id and its
 // encryption key are derived from it, so the servers never see it. The account keeps a keyring for it (the
-// synced item `@mio/keyring`): DK encrypted once under the password and once under a recovery key.
+// synced item `@mio/keyring`): DK encrypted under the account's master key (see account-keyring.ts), so the
+// account's password and its one recovery key open it, as they open every app's.
 //
-//   password wrap   PBKDF2-SHA256(password NFC, random 16-byte salt, 600,000 rounds) → AES-GCM over DK
-//   recovery wrap   HKDF-SHA256(recovery key bytes, info "mio/recovery") → AES-GCM over DK
+//   keyring (v 2)   { v: 2, mkid, mk: AES-GCM over DK under HKDF(MK, "mio/dk-wrap"), created }
 //   vault id        hex(SHA-256(HKDF(DK, "mio/vault-id")))
 //   vault key       HKDF(DK, "mio/vault-key") as AES-256-GCM
 //
-// A recovery key is 128 random bits written as 26 Crockford base32 characters. WebCrypto only.
+// Keyrings from before the account's master key (v 1) wrapped DK under the password and a recovery key of this
+// app's own; they still open (a sign-in moves them to v 2):
+//   password wrap   PBKDF2-SHA256(password NFC, random 16-byte salt, 600,000 rounds) → AES-GCM over DK
+//   recovery wrap   HKDF-SHA256(recovery key bytes, info "mio/recovery") → AES-GCM over DK
+//
+// WebCrypto only.
+
+import { unwrapAppKey, wrapAppKey, type Box } from './account-keyring'
 
 export const APP = 'mio'
 export const KEYRING = `@${APP}/keyring`
@@ -142,6 +149,38 @@ export function isKeyring(v: unknown): v is Keyring {
   const k = v as Keyring | null
   return !!k && typeof k === 'object' && k.v === 1 && typeof k.salt === 'string' && !!k.pw && !!k.rk && typeof k.created === 'number'
 }
+
+// ---------------------------------------------------------------- the keyring under the account's master key
+
+/** DK under the account's master key (`mkid` names it). */
+export interface MasterRing {
+  v: 2
+  mkid: string
+  mk: Box
+  created: number
+}
+
+/**
+ * Any keyring the account may hold: v 2, v 1, or v 1 on its way to v 2 (the master key's wrap added, the old
+ * wraps not yet dropped: a move interrupted between its two writes).
+ */
+export type AnyRing = MasterRing | (Keyring & { mkid?: string; mk?: Box })
+
+export function isMasterRing(v: unknown): v is MasterRing {
+  const k = v as MasterRing | null
+  return !!k && typeof k === 'object' && k.v === 2 && typeof k.mkid === 'string' && typeof k.mk?.ct === 'string' && typeof k.created === 'number'
+}
+
+export const isAnyRing = (v: unknown): v is AnyRing => isMasterRing(v) || isKeyring(v)
+
+/** This keyring's wrap under the master key `mkid`, if it has one. */
+export const masterWrap = (r: AnyRing, mkid: string): Box | null => (r.mkid === mkid && r.mk?.ct ? r.mk : null)
+
+export async function masterRing(dk: Uint8Array, mk: Uint8Array, mkid: string, created: number): Promise<MasterRing> {
+  return { v: 2, mkid, mk: await wrapAppKey(mk, APP, dk), created }
+}
+
+export const openMasterWrap = (mk: Uint8Array, box: Box) => unwrapAppKey(mk, APP, box)
 
 export async function unlockWithPassword(k: Keyring, password: string): Promise<Uint8Array | null> {
   return unwrap(await passwordKey(password, unb64(k.salt)), k.pw)

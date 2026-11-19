@@ -1,7 +1,8 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import worker, { type Env } from '../worker/index'
+import * as AK from '../src/lib/account-keyring'
 import { emptyDB, type DB, type Txn } from '../src/lib/types'
-import { accounts, accountService, ACCOUNT_API, resetPassword } from './fake-account'
+import { accounts, accountService, ACCOUNT_API, makeAccount, resetPassword } from './fake-account'
 import { bucket, countUnder, objects } from './fake-r2'
 
 // Sign-in with the shared account, the keyring and recovery key, and the move from the old accounts: devices
@@ -44,6 +45,9 @@ async function device(db?: DB): Promise<Device> {
   return d
 }
 
+/** What a device keeps in IndexedDB. */
+const get = async (d: Device, k: string) => structuredClone(d.kv.get(k)) as { key: string }
+
 /** Run something as this device. */
 async function on<T>(d: Device, fn: () => Promise<T> | T): Promise<T> {
   env.kv = d.kv
@@ -67,6 +71,15 @@ const ids = (db: DB) => Object.keys(db.txns).sort()
 const keyring = (email: string) => {
   const item = accounts.get(email)?.items.get('@mio/keyring')
   return item?.v ? JSON.parse(item.v) : null
+}
+const accountRing = (email: string) => {
+  const item = accounts.get(email)?.items.get('@account/keyring')
+  return item?.v ? JSON.parse(item.v) : null
+}
+/** An item as an app that sends no precondition (the versions live before this one) writes it. */
+function putItem(email: string, k: string, v: unknown) {
+  const a = accounts.get(email)!
+  a.items.set(k, { v: JSON.stringify(v), t: Date.now(), seq: ++a.seq })
 }
 
 beforeAll(() => {
@@ -107,18 +120,23 @@ beforeEach(() => {
 })
 
 describe('a new account', () => {
-  it('starts with this device’s budget, a keyring and a recovery key; a second device joins with the password', async () => {
+  it('starts with this device’s budget, the account’s keyring and recovery key; a second device joins with the password', async () => {
     const a = await device(budget('A'))
     const step = await on(a, () => a.signin.signIn('Ana@Example.com ', 'first password', { create: true }))
     expect(step.kind).toBe('done')
     const recovery = (step as { recovery: string }).recovery
     expect(recovery).toMatch(/^([0-9A-Z]{4}-){6}[0-9A-Z]{2}$/)
-    expect(a.sync.syncStatus()).toMatchObject({ email: 'ana@example.com', state: 'idle', dirty: false, pending: recovery, legacy: false })
+    expect(a.sync.syncStatus()).toMatchObject({ email: 'ana@example.com', state: 'idle', dirty: false, pending: recovery, legacy: false, master: true })
     await on(a, () => a.signin.recoverySaved())
     expect(a.sync.syncStatus().pending).toBe(null)
-    // The account holds only the wrapped key; the budget is in the vault, encrypted.
+    // The account holds only wrapped keys: the master key under the password and the recovery key, the budget's
+    // key under the master key. The budget is in the vault, encrypted.
+    const acct = accountRing('ana@example.com')
+    expect(Object.keys(acct).sort()).toEqual(['created', 'id', 'pw', 'rk', 'rkid', 'salt', 'v'])
+    expect(await AK.isCurrentRecovery(acct, recovery)).toBe(true)
     const ring = keyring('ana@example.com')
-    expect(Object.keys(ring).sort()).toEqual(['created', 'pw', 'rk', 'salt', 'v'])
+    expect(Object.keys(ring).sort()).toEqual(['created', 'mk', 'mkid', 'v'])
+    expect(ring.mkid).toBe(acct.id)
     expect(countUnder('vaults/')).toBe(1)
     expect([...objects.values()].some((o) => o.data.includes('Living'))).toBe(false)
 
@@ -129,6 +147,7 @@ describe('a new account', () => {
     expect(asked).toBe(1)
     expect(ids(b.S.getDB())).toEqual(['tA'])
     expect(b.sync.syncStatus().code).toBe(a.sync.syncStatus().code)
+    expect(b.sync.syncStatus().master).toBe(true)
 
     // Edits travel both ways.
     await on(b, async () => {
@@ -151,18 +170,34 @@ describe('a new account', () => {
     expect(b.sync.syncStatus().email).toBe(null)
   })
 
-  it('an account made in another app (no keyring yet) gets this device’s budget', async () => {
-    accounts.set('cb@example.com', { email: 'cb@example.com', password: 'brain password', sessions: new Set(), items: new Map(), seq: 0 })
+  it('an account made in another app (no keys yet) gets this device’s budget and the account’s first recovery key', async () => {
+    makeAccount('cb@example.com', 'brain password')
     const a = await device(budget('A'))
     const step = await on(a, () => a.signin.signIn('cb@example.com', 'brain password'))
     expect(step.kind).toBe('done')
     expect((step as { recovery?: string }).recovery).toBeTruthy()
-    expect(keyring('cb@example.com')).toBeTruthy()
+    expect(keyring('cb@example.com').mkid).toBe(accountRing('cb@example.com').id)
+  })
+
+  it('an account whose keys another app made: the same master key, no new recovery key', async () => {
+    makeAccount('tdw@example.com', 'the password')
+    const other = await AK.createAccountRing('the password')
+    putItem('tdw@example.com', '@account/keyring', other.ring)
+    const a = await device(budget('A'))
+    expect(await on(a, () => a.signin.signIn('tdw@example.com', 'the password'))).toEqual({ kind: 'done', recovery: undefined })
+    expect(keyring('tdw@example.com').mkid).toBe(other.ring.id)
+    expect(accountRing('tdw@example.com')).toEqual(other.ring)
+    // That app's recovery key opens this budget too.
+    resetPassword('tdw@example.com', 'new password')
+    const b = await device()
+    expect(await on(b, () => b.signin.signIn('tdw@example.com', 'new password'))).toEqual({ kind: 'recovery' })
+    expect((await on(b, () => b.signin.withRecoveryKey(other.recovery))).kind).toBe('done')
+    expect(ids(b.S.getDB())).toEqual(['tA'])
   })
 })
 
 describe('a forgotten password', () => {
-  it('after a reset, a new device asks for the recovery key, refuses a wrong one, then opens with the new password too', async () => {
+  it('after a reset, a new device asks for the account’s recovery key, refuses a wrong one, then opens with the new password too', async () => {
     const a = await device(budget('A'))
     const made = await on(a, () => a.signin.signIn('ana@example.com', 'first password', { create: true }))
     const recovery = (made as { recovery: string }).recovery
@@ -171,7 +206,7 @@ describe('a forgotten password', () => {
     const c = await device()
     expect(await on(c, () => c.signin.signIn('ana@example.com', 'second password'))).toEqual({ kind: 'recovery' })
     expect((await on(c, () => c.signin.withRecoveryKey('not a key'))).kind).toBe('fail')
-    const other = c.keys.formatRecoveryKey(c.keys.newRecoveryKey())
+    const other = AK.formatRecovery(c.keys.newRecoveryKey())
     expect(await on(c, () => c.signin.withRecoveryKey(other))).toEqual({ kind: 'fail', message: 'That recovery key doesn’t open this account' })
     expect(c.sync.syncStatus().email).toBe(null)
     // Typed by hand: lower case, spaces for dashes.
@@ -179,18 +214,19 @@ describe('a forgotten password', () => {
     expect((await on(c, () => c.signin.withRecoveryKey(typed))).kind).toBe('done')
     expect(ids(c.S.getDB())).toEqual(['tA'])
 
-    // The keyring opens with the new password now: the next device needs no recovery key.
+    // The account's keys open with the new password now: the next device needs no recovery key.
     const d = await device()
     expect((await on(d, () => d.signin.signIn('ana@example.com', 'second password'))).kind).toBe('done')
     expect(ids(d.S.getDB())).toEqual(['tA'])
     // And the recovery key still works.
-    expect(await c.keys.unlockWithRecovery(keyring('ana@example.com'), c.keys.parseRecoveryKey(recovery)!)).toBeTruthy()
+    expect(await AK.openWithRecovery(accountRing('ana@example.com'), recovery)).toBeTruthy()
   })
 
-  it('a device that still holds the key keeps syncing, and its next sign-in wraps the key under the new password', async () => {
+  it('a device that still holds the keys keeps syncing, and its next sign-in wraps them under the new password', async () => {
     const a = await device(budget('A'))
     await on(a, () => a.signin.signIn('ana@example.com', 'first password', { create: true }))
-    const before = keyring('ana@example.com')
+    await on(a, () => a.signin.recoverySaved())
+    const before = accountRing('ana@example.com')
     resetPassword('ana@example.com', 'second password')
     // Still syncing with the key it holds, although its session ended.
     await on(a, async () => {
@@ -199,32 +235,33 @@ describe('a forgotten password', () => {
     })
     expect(a.sync.syncStatus()).toMatchObject({ state: 'idle', dirty: false })
     expect(await on(a, () => a.signin.signIn('ana@example.com', 'second password'))).toEqual({ kind: 'done', recovery: undefined })
-    const after = keyring('ana@example.com')
-    expect(after.created).toBe(before.created)
+    const after = accountRing('ana@example.com')
+    expect(after.id).toBe(before.id)
     expect(after.rk).toEqual(before.rk)
-    expect(await a.keys.unlockWithPassword(after, 'second password')).toBeTruthy()
+    expect(await AK.openWithPassword(after, 'second password')).toBeTruthy()
 
     const b = await device()
     expect((await on(b, () => b.signin.signIn('ana@example.com', 'second password'))).kind).toBe('done')
     expect(ids(b.S.getDB())).toEqual(['afterReset', 'tA'])
   })
 
-  it('a new recovery key replaces the old one, signing in again when the session ended', async () => {
+  it('a new recovery key replaces the account’s, signing in again when the session ended', async () => {
     const a = await device(budget('A'))
     const made = await on(a, () => a.signin.signIn('ana@example.com', 'first password', { create: true }))
-    const old = a.keys.parseRecoveryKey((made as { recovery: string }).recovery)!
+    const old = (made as { recovery: string }).recovery
     const next = await on(a, () => a.signin.replaceRecoveryKey())
     expect(next.kind).toBe('done')
-    const fresh = a.keys.parseRecoveryKey((next as { recovery: string }).recovery)!
-    expect(await a.keys.unlockWithRecovery(keyring('ana@example.com'), old)).toBe(null)
-    expect(await a.keys.unlockWithRecovery(keyring('ana@example.com'), fresh)).toBeTruthy()
+    const fresh = (next as { recovery: string }).recovery
+    expect(a.sync.syncStatus().pending).toBe(fresh)
+    expect(await AK.openWithRecovery(accountRing('ana@example.com'), old)).toBe(null)
+    expect(await AK.openWithRecovery(accountRing('ana@example.com'), fresh)).toBeTruthy()
 
     resetPassword('ana@example.com', 'second password')
     expect(await on(a, () => a.signin.replaceRecoveryKey())).toEqual({ kind: 'password' })
     expect((await on(a, () => a.signin.replaceRecoveryKey('wrong password'))).kind).toBe('fail')
     expect((await on(a, () => a.signin.replaceRecoveryKey('second password'))).kind).toBe('done')
-    // Signing in there also renewed the password wrap.
-    expect(await a.keys.unlockWithPassword(keyring('ana@example.com'), 'second password')).toBeTruthy()
+    // Signing in there also renewed the password wrap (with the master key this device holds).
+    expect(await AK.openWithPassword(accountRing('ana@example.com'), 'second password')).toBeTruthy()
   })
 })
 
@@ -298,19 +335,20 @@ describe('moving from the old accounts', () => {
   it('asks for the account’s own password when it differs from the old one', async () => {
     const phone = await device(budget('P'))
     await oldAccount(phone, 'old@example.com', 'old password')
-    accounts.set('old@example.com', { email: 'old@example.com', password: 'brain password', sessions: new Set(), items: new Map(), seq: 0 })
+    makeAccount('old@example.com', 'brain password')
     const tablet = await device()
     expect(await on(tablet, () => tablet.signin.signIn('old@example.com', 'old password'))).toEqual({ kind: 'account-password' })
     expect((await on(tablet, () => tablet.signin.withAccountPassword('still wrong'))).kind).toBe('fail')
     expect((await on(tablet, () => tablet.signin.withAccountPassword('brain password'))).kind).toBe('done')
     expect(ids(tablet.S.getDB())).toEqual(['tP'])
-    expect(await tablet.keys.unlockWithPassword(keyring('old@example.com'), 'brain password')).toBeTruthy()
+    expect(await AK.openWithPassword(accountRing('old@example.com'), 'brain password')).toBeTruthy()
+    expect(keyring('old@example.com').v).toBe(2)
   })
 
   it('asks for the old password when the account’s password doesn’t open the old budget, or goes on without it', async () => {
     const phone = await device(budget('P'))
     await oldAccount(phone, 'old@example.com', 'old password')
-    accounts.set('old@example.com', { email: 'old@example.com', password: 'brain password', sessions: new Set(), items: new Map(), seq: 0 })
+    makeAccount('old@example.com', 'brain password')
     const tablet = await device()
     expect(await on(tablet, () => tablet.signin.signIn('old@example.com', 'brain password'))).toEqual({ kind: 'old-password' })
     expect((await on(tablet, () => tablet.signin.withOldPassword('not it either'))).kind).toBe('fail')
@@ -321,7 +359,7 @@ describe('moving from the old accounts', () => {
     accounts.clear()
     objects.clear()
     await oldAccount(phone, 'old@example.com', 'old password')
-    accounts.set('old@example.com', { email: 'old@example.com', password: 'brain password', sessions: new Set(), items: new Map(), seq: 0 })
+    makeAccount('old@example.com', 'brain password')
     const other = await device(budget('O'))
     expect(await on(other, () => other.signin.signIn('old@example.com', 'brain password'))).toEqual({ kind: 'old-password' })
     expect((await on(other, () => other.signin.withOldPassword(null))).kind).toBe('done')
@@ -332,7 +370,7 @@ describe('moving from the old accounts', () => {
   it('a device still signed in to the old account moves with the shared account’s password', async () => {
     const phone = await device(budget('P'))
     await oldAccount(phone, 'old@example.com', 'old password')
-    accounts.set('old@example.com', { email: 'old@example.com', password: 'brain password', sessions: new Set(), items: new Map(), seq: 0 })
+    makeAccount('old@example.com', 'brain password')
     expect((await on(phone, () => phone.signin.signIn('old@example.com', 'brain password'))).kind).toBe('done')
     expect(phone.sync.syncStatus().legacy).toBe(false)
     expect(ids(phone.S.getDB())).toEqual(['tP'])
@@ -375,5 +413,216 @@ describe('moving from the old accounts', () => {
     await on(b, () => b.sync.enableSync('ABCDE-FGHJK-MNPQR-STUVW'))
     expect(ids(b.S.getDB())).toEqual(['tA'])
     expect(b.sync.syncStatus().legacy).toBe(false)
+  })
+})
+
+describe('one recovery key for the whole account (keyrings from before it)', () => {
+  /**
+   * An account as the previous version left it: this budget's keyring under the password and Money in Order's own
+   * recovery key, its vault, and a device syncing it with the data key (no master key).
+   */
+  async function before(email: string, password: string, db = budget('A')) {
+    makeAccount(email, password)
+    const d = await device(db)
+    const dk = d.keys.newDataKey()
+    const rk = d.keys.newRecoveryKey()
+    const ring = await d.keys.makeKeyring(dk, password, rk)
+    putItem(email, '@mio/keyring', ring)
+    const login = await (await accountService(`${ACCOUNT_API}/login`, { method: 'POST', body: JSON.stringify({ email, password }) })).json()
+    await on(d, () => d.sync.enableSync(d.keys.codeOf(dk), email, { token: login.token, ring: ring.created }))
+    expect(d.sync.syncStatus()).toMatchObject({ state: 'idle', master: false })
+    return { d, dk, ring, appKey: d.keys.formatRecoveryKey(rk) }
+  }
+
+  it('Money in Order first: the account’s keys are made, the budget’s key moves under them, the same data', async () => {
+    const { d, dk, ring, appKey } = await before('ana@example.com', 'the password')
+    await on(d, async () => {
+      d.S.commit({ txns: [txn('unsent', 'cA')] })
+    })
+    const step = await on(d, () => d.signin.switchToAccountKeys('the password'))
+    expect(step.kind).toBe('done')
+    const recovery = (step as { recovery: string }).recovery
+    expect(await AK.isCurrentRecovery(accountRing('ana@example.com'), recovery)).toBe(true)
+    expect(d.sync.syncStatus()).toMatchObject({ master: true, pending: recovery })
+    // Same data key, same budget, same vault: nothing re-encrypted.
+    const moved = keyring('ana@example.com')
+    expect(moved).toMatchObject({ v: 2, created: ring.created, mkid: accountRing('ana@example.com').id })
+    expect(Object.keys(moved).sort()).toEqual(['created', 'mk', 'mkid', 'v'])
+    expect(d.sync.syncStatus().code).toBe(d.keys.codeOf(dk))
+    await on(d, () => d.sync.syncNow())
+    expect(countUnder('vaults/')).toBe(1)
+    // Money in Order's own recovery key opens nothing now; the account's does.
+    expect(await d.keys.unlockWithRecovery(moved, d.keys.parseRecoveryKey(appKey)!)).toBe(null)
+    resetPassword('ana@example.com', 'new password')
+    const b = await device()
+    expect(await on(b, () => b.signin.signIn('ana@example.com', 'new password'))).toEqual({ kind: 'recovery' })
+    expect(await on(b, () => b.signin.withRecoveryKey(appKey))).toEqual({ kind: 'fail', message: 'That recovery key doesn’t open this account' })
+    expect((await on(b, () => b.signin.withRecoveryKey(recovery))).kind).toBe('done')
+    expect(ids(b.S.getDB())).toEqual(['tA', 'unsent'])
+  })
+
+  it('a sign-in on a new device moves it too; the recovery key is shown until saved, on the device that made it', async () => {
+    const { d } = await before('ana@example.com', 'the password')
+    const b = await device()
+    const step = await on(b, () => b.signin.signIn('ana@example.com', 'the password'))
+    const recovery = (step as { recovery: string }).recovery
+    expect(recovery).toBeTruthy()
+    expect(ids(b.S.getDB())).toEqual(['tA'])
+    // Not saved yet: signing in again on that device shows the same key, as long as it is the account's.
+    expect(await on(b, () => b.signin.signIn('ana@example.com', 'the password'))).toEqual({ kind: 'done', recovery })
+    await on(b, () => b.signin.recoverySaved())
+    expect(await on(b, () => b.signin.signIn('ana@example.com', 'the password'))).toEqual({ kind: 'done', recovery: undefined })
+    // The old device keeps syncing with its data key, and gets the master key with the password.
+    await on(d, async () => {
+      d.S.commit({ txns: [txn('oldDevice', 'cA')] })
+      await d.sync.syncNow()
+    })
+    expect(await on(d, () => d.signin.switchToAccountKeys('the password'))).toEqual({ kind: 'done', recovery: undefined })
+    expect(d.sync.syncStatus().master).toBe(true)
+    await on(b, () => b.sync.syncNow())
+    expect(ids(b.S.getDB())).toEqual(['oldDevice', 'tA'])
+  })
+
+  it('another app moved first: no new recovery key, the budget’s key goes under the account’s', async () => {
+    const { d, dk } = await before('ana@example.com', 'the password')
+    const other = await AK.createAccountRing('the password')
+    putItem('ana@example.com', '@account/keyring', other.ring)
+    const b = await device()
+    expect(await on(b, () => b.signin.signIn('ana@example.com', 'the password'))).toEqual({ kind: 'done', recovery: undefined, covered: true })
+    expect(keyring('ana@example.com').mkid).toBe(other.ring.id)
+    expect(await d.keys.openMasterWrap(other.mk, keyring('ana@example.com').mk)).toEqual(dk)
+    expect(accountRing('ana@example.com')).toEqual(other.ring)
+  })
+
+  it('a move cut off between its writes finishes on the next sign-in, and the old wraps go only after the new one reads back', async () => {
+    const { d, ring } = await before('ana@example.com', 'the password')
+    const real = globalThis.fetch
+    const writes: unknown[] = []
+    // The second write of this app's keyring (the one that drops the old wraps) never arrives.
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      const body = String(init?.body ?? '')
+      if (url.endsWith('/sync') && body.includes('"@mio/keyring"') && body.includes('"if"')) {
+        writes.push(JSON.parse(body).changes[0].v)
+        if (writes.length === 2) throw new TypeError('Failed to fetch')
+      }
+      return real(url, init)
+    })
+    let first
+    try {
+      first = await on(d, () => d.signin.switchToAccountKeys('the password'))
+    } finally {
+      vi.stubGlobal('fetch', real)
+    }
+    expect(first.kind).toBe('fail')
+    // Halfway: the master key's wrap is there, next to the old ones, which still work.
+    const half = keyring('ana@example.com')
+    expect(half).toMatchObject({ v: 1, pw: ring.pw, rk: ring.rk, mkid: accountRing('ana@example.com').id })
+    expect(await d.keys.unlockWithPassword(half, 'the password')).toBeTruthy()
+    const recovery = (await get(d, 'mio-recovery-draft')).key
+    // Still syncing meanwhile, and a new device signs in.
+    await on(d, () => d.sync.syncNow())
+    expect(d.sync.syncStatus().state).toBe('idle')
+    const b = await device()
+    expect(await on(b, () => b.signin.signIn('ana@example.com', 'the password'))).toEqual({ kind: 'done', recovery: undefined, covered: true })
+    expect(keyring('ana@example.com')).toMatchObject({ v: 2, created: ring.created })
+    expect(keyring('ana@example.com').pw).toBeUndefined()
+    // The device that made the key still has it to show.
+    expect(await on(d, () => d.signin.switchToAccountKeys('the password'))).toEqual({ kind: 'done', recovery })
+  })
+
+  it('cut off right after the account’s keys were written: the same recovery key comes back, nothing is made twice', async () => {
+    const { d } = await before('ana@example.com', 'the password')
+    const real = globalThis.fetch
+    let cut = true
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      const res = await real(url, init)
+      if (cut && String(init?.body ?? '').includes('"@account/keyring"') && String(init?.body).includes('"if"')) {
+        cut = false
+        throw new TypeError('Failed to fetch') // written, but the answer never came
+      }
+      return res
+    })
+    try {
+      expect((await on(d, () => d.signin.switchToAccountKeys('the password'))).kind).toBe('fail')
+    } finally {
+      vi.stubGlobal('fetch', real)
+    }
+    const id = accountRing('ana@example.com').id
+    const step = await on(d, () => d.signin.switchToAccountKeys('the password'))
+    expect(step.kind).toBe('done')
+    expect(accountRing('ana@example.com').id).toBe(id)
+    expect(await AK.isCurrentRecovery(accountRing('ana@example.com'), (step as { recovery: string }).recovery)).toBe(true)
+  })
+
+  it('two devices moving at once: one master key, one recovery key that works, both on the same budget', async () => {
+    const { d } = await before('ana@example.com', 'the password')
+    const b = await device()
+    const real = globalThis.fetch
+    let raced = false
+    let bStep: unknown
+    // Just as d writes the account's keyring, b signs in and moves everything first.
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (!raced && env.kv === d.kv && String(init?.body ?? '').includes('"@account/keyring"') && String(init?.body).includes('"if"')) {
+        raced = true
+        bStep = await on(b, () => b.signin.signIn('ana@example.com', 'the password'))
+        env.kv = d.kv
+      }
+      return real(url, init)
+    })
+    let dStep
+    try {
+      dStep = await on(d, () => d.signin.switchToAccountKeys('the password'))
+    } finally {
+      vi.stubGlobal('fetch', real)
+    }
+    expect(raced).toBe(true)
+    const recovery = (bStep as { recovery: string }).recovery
+    expect(recovery).toBeTruthy()
+    // d lost the race: it uses b's keys and shows no key of its own (the one it made never reached the account).
+    expect(dStep).toEqual({ kind: 'done', recovery: undefined })
+    expect(await AK.isCurrentRecovery(accountRing('ana@example.com'), recovery)).toBe(true)
+    expect(d.sync.syncStatus().code).toBe(b.sync.syncStatus().code)
+    expect(d.sync.syncStatus().master).toBe(true)
+    expect(keyring('ana@example.com').v).toBe(2)
+  })
+
+  it('reset before the move, the account’s keys made elsewhere after it: asks for Money in Order’s old key once', async () => {
+    const { d, appKey } = await before('ana@example.com', 'old password')
+    resetPassword('ana@example.com', 'new password')
+    const other = await AK.createAccountRing('new password')
+    putItem('ana@example.com', '@account/keyring', other.ring)
+    const b = await device()
+    expect(await on(b, () => b.signin.signIn('ana@example.com', 'new password'))).toEqual({ kind: 'recovery', old: true })
+    expect(await on(b, () => b.signin.withRecoveryKey(other.recovery))).toEqual({ kind: 'fail', message: 'That recovery key doesn’t open this account' })
+    expect(await on(b, () => b.signin.withRecoveryKey(appKey))).toEqual({ kind: 'done', recovery: undefined, covered: true })
+    expect(ids(b.S.getDB())).toEqual(['tA'])
+    // A device holding the data key needs neither.
+    expect((await on(d, () => d.signin.switchToAccountKeys('new password'))).kind).toBe('done')
+  })
+
+  it('an app that sends no precondition (the version live today) can’t write over the moved keyring', async () => {
+    const { d } = await before('ana@example.com', 'the password')
+    await on(d, () => d.signin.switchToAccountKeys('the password'))
+    const moved = keyring('ana@example.com')
+    const login = await (await accountService(`${ACCOUNT_API}/login`, { method: 'POST', body: JSON.stringify({ email: 'ana@example.com', password: 'the password' }) })).json()
+    const fresh = await d.keys.makeKeyring(d.keys.newDataKey(), 'the password', d.keys.newRecoveryKey())
+    const res = await (await accountService(`${ACCOUNT_API}/sync`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${login.token}` },
+      body: JSON.stringify({ app: 'mio', since: 0, changes: [{ k: '@mio/keyring', v: fresh, t: Date.now() + 10_000 }] }),
+    })).json()
+    expect(res.rejected).toEqual(['@mio/keyring'])
+    expect(keyring('ana@example.com')).toEqual(moved)
+  })
+
+  it('the account started over elsewhere: a device holding the data key puts it under the new master key', async () => {
+    const { d, dk } = await before('ana@example.com', 'the password')
+    await on(d, () => d.signin.switchToAccountKeys('the password'))
+    const other = await AK.createAccountRing('the password')
+    const a = accounts.get('ana@example.com')!
+    a.items.set('@account/keyring', { v: JSON.stringify(other.ring), t: Date.now(), seq: ++a.seq })
+    expect((await on(d, () => d.signin.signIn('ana@example.com', 'the password'))).kind).toBe('done')
+    expect(keyring('ana@example.com').mkid).toBe(other.ring.id)
+    expect(await d.keys.openMasterWrap(other.mk, keyring('ana@example.com').mk)).toEqual(dk)
   })
 })

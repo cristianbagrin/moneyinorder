@@ -42,12 +42,18 @@ Sync works with the one account for all of Chris's apps (Chinese Brain, At Peace
 - The budget is end-to-end encrypted. Each budget has a **data key**: 32 random bytes made on the first device.
   The vault id (`SHA-256(HKDF(key, "mio/vault-id"))`) and the AES-256-GCM key that encrypts it (`HKDF(key, "mio/vault-key")`)
   come from it, so neither server can read the budget.
-- The account keeps only a **keyring** for that key (the synced item `@mio/keyring`): the key encrypted under the
-  password (`PBKDF2-SHA256`, a random salt, 600,000 rounds) and under a **recovery key** (128 random bits, shown once as
-  26 characters; `HKDF(recovery key, "mio/recovery")`). Neither the account service nor this app's server has a key to the data.
-- Each signed-in device keeps the data key. If the password changes (reset or changed on the account page), those
-  devices keep syncing, and the next sign-in wraps the key under the new password. A new device then needs the
-  recovery key once. **Settings → Sync → Recovery key** makes a new one (the old one stops working).
+- The account keeps only wrapped keys. Its **master key** (the synced item `@account/keyring`, shared by every app
+  that encrypts) is encrypted under the password (`PBKDF2-SHA256`, a random salt, 600,000 rounds) and under the
+  account's one **recovery key** (128 random bits, shown once as 26 characters). This budget's data key is encrypted
+  under the master key (`@mio/keyring`, `HKDF(master key, "mio/dk-wrap")`). Neither the account service nor this app's
+  server has a key to the data. The scheme is defined in the account service's repo (`site/public/acct/keyring.js`).
+- Each signed-in device keeps the data key and the master key. If the password changes (reset or changed elsewhere),
+  those devices keep syncing, and the next sign-in wraps the master key under the new password. A new device then
+  needs the recovery key once. **Settings → Sync → Recovery key** makes a new one for the whole account (the old one
+  stops working in every app; the account page can do the same).
+- Budgets synced before the account had a master key had Money in Order's own recovery key. The first sign-in (or
+  Settings → Sync → Switch) moves the data key under the master key, without changing it, and only then drops the old
+  wraps; the account's recovery key is shown then if no app made one before.
 - With no password, no recovery key and no signed-in device, the synced data can't be opened by anyone. Each device
   still has its full local data, and **Settings → Your data → Save backup** saves a file.
 
@@ -94,7 +100,7 @@ Code map:
 - `src/lib/compare.ts`, `src/lib/insights.ts`: Review's figures (a month against its usual, savings, goals)
 - `src/lib/store.ts`: data, undo and every mutation; `src/lib/persist.ts`: IndexedDB, safe across tabs and reloads
 - `src/lib/sync.ts`: encryption and the pull/merge/push loop; `src/lib/merge.ts`: the record merge
-- `src/lib/keys.ts`: the data key, keyring and recovery key; `src/lib/account.ts`: the shared account; `src/lib/signin.ts`: sign-in, recovery and the move from the old accounts
+- `src/lib/keys.ts`: the data key and its keyring; `src/lib/account-keyring.ts`: the account's master key and recovery key; `src/lib/account.ts`: the shared account; `src/lib/signin.ts`: sign-in, recovery and the move from the old accounts
 - `src/lib/export.ts`: the Claude summary and CSV
 - `src/views/*`: screens; `src/styles.css`: the whole design system
 

@@ -42,8 +42,12 @@ export interface SyncConfig {
   token?: string
   /** the keyring's `created`: which keyring this device's data key belongs to */
   ring?: number
+  /** the account's master key (base64): opens this app's keyring and wraps the account's under a new password */
+  mk?: string
   /** a recovery key just made here, shown until the person says they saved it */
   pending?: string
+  /** that key replaced Money in Order's own from before (say so once) */
+  replaced?: boolean
   rev: string | null
   /** local edits not yet uploaded */
   dirty: boolean
@@ -98,6 +102,9 @@ export function syncStatus() {
     legacy: !!cfg?.email && !dkOf(cfg.code),
     /** a recovery key waiting to be saved */
     pending: cfg?.pending ?? null,
+    replaced: !!cfg?.replaced,
+    /** signed in with the account's master key on this device (else the password is needed once to get it) */
+    master: !!cfg?.mk,
     last: cfg?.last ?? 0,
     dirty: cfg?.dirty ?? false,
     /** sync is on but changes made here haven't reached the server for a while */
@@ -467,7 +474,7 @@ export function syncIdle(): Promise<void> {
 }
 
 /** Start syncing under a secret. Local data is merged with whatever is stored under it. */
-export async function enableSync(code: string, email?: string, extra: Pick<SyncConfig, 'token' | 'ring' | 'pending'> = {}) {
+export async function enableSync(code: string, email?: string, extra: Pick<SyncConfig, 'token' | 'ring' | 'pending' | 'mk' | 'replaced'> = {}) {
   const k = await derive(code)
   cfg = { code, email, ...extra, rev: null, dirty: true, since: Date.now(), last: 0, epoch: dbEpoch() }
   keys = k
@@ -489,7 +496,7 @@ async function moveTo(c: SyncConfig, dk: Uint8Array) {
 }
 
 /** Take the budget stored under a secret as it is: this device's own data is replaced, so two budgets never get mixed. */
-export async function adopt(code: string, email: string | undefined, reply: VaultReply, extra: Pick<SyncConfig, 'token' | 'ring' | 'pending'> = {}) {
+export async function adopt(code: string, email: string | undefined, reply: VaultReply, extra: Pick<SyncConfig, 'token' | 'ring' | 'pending' | 'mk' | 'replaced'> = {}) {
   const k = await derive(code)
   const mark = Date.now()
   const remote = (await openReply(reply, k.key)) ?? emptyDB()
@@ -508,7 +515,7 @@ export async function join(
   code: string,
   email: string,
   replace: () => boolean = () => true,
-  extra: Pick<SyncConfig, 'token' | 'ring' | 'pending'> = {},
+  extra: Pick<SyncConfig, 'token' | 'ring' | 'pending' | 'mk' | 'replaced'> = {},
 ): Promise<'joined' | 'cancelled' | 'empty' | 'error'> {
   const k = await derive(code)
   const res = await pullVault(k.id)
@@ -526,7 +533,7 @@ export function syncConfig(): Readonly<SyncConfig> | null {
 }
 
 /** Change the account details kept with the sync settings (session, keyring, pending recovery key). */
-export async function updateAccount(patch: Pick<SyncConfig, 'token' | 'ring' | 'pending' | 'email'>) {
+export async function updateAccount(patch: Pick<SyncConfig, 'token' | 'ring' | 'pending' | 'email' | 'mk' | 'replaced'>) {
   if (!cfg) return
   cfg = { ...cfg, ...patch }
   for (const k of Object.keys(patch) as (keyof typeof patch)[]) if (patch[k] === undefined) delete cfg[k]

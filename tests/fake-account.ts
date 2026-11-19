@@ -8,6 +8,8 @@ interface Acct {
   sessions: Set<string>
   items: Map<string, Item>
   seq: number
+  /** items written with a precondition: only another such write replaces them */
+  guarded: Set<string>
 }
 
 const g = globalThis as { fakeAccounts?: Map<string, Acct> }
@@ -32,6 +34,11 @@ const session = (a: Acct) => {
   return t
 }
 
+/** An account as made by another app (Chinese Brain, At Peace): nothing synced yet. */
+export function makeAccount(email: string, password: string) {
+  accounts.set(email, { email, password, sessions: new Set(), items: new Map(), seq: 0, guarded: new Set() })
+}
+
 /** Set a new password as a reset link does: every session ends. */
 export function resetPassword(email: string, password: string) {
   const a = accounts.get(email)!
@@ -49,7 +56,7 @@ export async function accountService(url: string, init: RequestInit = {}): Promi
     case 'signup': {
       if (String(body.password).length < 8) return fail(400, 'short', 'Use at least 8 characters for your password.')
       if (accounts.has(email)) return fail(409, 'exists', 'This email already has an account. Sign in instead.')
-      const a: Acct = { email, password: body.password, sessions: new Set(), items: new Map(), seq: 0 }
+      const a: Acct = { email, password: body.password, sessions: new Set(), items: new Map(), seq: 0, guarded: new Set() }
       accounts.set(email, a)
       return json({ token: session(a), email })
     }
@@ -69,20 +76,28 @@ export async function accountService(url: string, init: RequestInit = {}): Promi
       if (!a) return fail(401, 'signed_out', 'You’re signed out. Sign in again.')
       const app = String(body.app)
       const mine = new Set<string>()
+      const rejected = new Set<string>()
       for (const c of body.changes ?? []) {
         if (!String(c.k).startsWith(`@${app}/`)) continue
         const v = c.v == null ? null : canon(c.v)
         const old = a.items.get(c.k)
         const t = Math.min(Number(c.t) || 0, Date.now())
-        if (old && old.t > t) continue
+        // A precondition (`if`: the `s` read) beats the times; an item written with one needs one from then on.
+        const cond = c.if !== undefined && c.if !== null
+        if (cond ? c.if !== (old?.seq ?? 0) : app === 'account' || a.guarded.has(c.k)) {
+          rejected.add(c.k)
+          continue
+        }
+        if (!cond && old && old.t > t) continue
+        if (cond) a.guarded.add(c.k)
         mine.add(c.k)
         if (old && old.v === v) continue
         a.items.set(c.k, { v, t: Math.max(t, old?.t ?? 0), seq: ++a.seq })
       }
       const changes = [...a.items.entries()]
-        .filter(([k, i]) => k.startsWith(`@${app}/`) && i.seq > (Number(body.since) || 0) && !mine.has(k))
-        .map(([k, i]) => ({ k, v: i.v == null ? null : JSON.parse(i.v), t: i.t }))
-      return json({ seq: a.seq, more: false, changes })
+        .filter(([k, i]) => k.startsWith(`@${app}/`) && (i.seq > (Number(body.since) || 0) || rejected.has(k)) && !mine.has(k))
+        .map(([k, i]) => ({ k, v: i.v == null ? null : JSON.parse(i.v), t: i.t, s: i.seq }))
+      return json({ seq: a.seq, more: false, changes, ...(rejected.size ? { rejected: [...rejected] } : {}) })
     }
   }
   return fail(404, 'not_found', 'Not found.')

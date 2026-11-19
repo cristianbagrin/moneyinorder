@@ -1,6 +1,7 @@
 /// <reference types="node" />
 import { createServer, type Server } from 'node:http'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import * as AK from '../../src/lib/account-keyring'
 import { COLLECTIONS, type DB } from '../../src/lib/types'
 import { bigDB } from '../fixtures/big'
 
@@ -73,6 +74,12 @@ async function keyringOf(token: string, d: Device) {
   return r.ring
 }
 
+async function accountRingOf(token: string, d: Device) {
+  const r = await d.account.readAccountRing(token)
+  if (!r.ok) throw new Error(r.message)
+  return r.ring
+}
+
 describe.skipIf(!APP || !ACCOUNT)('end to end, both Workers running locally', () => {
   beforeAll(async () => {
     Object.defineProperty(globalThis, 'navigator', { value: { onLine: true }, configurable: true })
@@ -106,7 +113,8 @@ describe.skipIf(!APP || !ACCOUNT)('end to end, both Workers running locally', ()
     expect((made as { recovery: string }).recovery).toMatch(/^([0-9A-Z]{4}-){6}[0-9A-Z]{2}$/)
     expect(a.sync.syncStatus()).toMatchObject({ state: 'idle', dirty: false, legacy: false })
     const ring = await keyringOf(a.sync.syncConfig()!.token!, a)
-    expect(ring && Object.keys(ring).sort()).toEqual(['created', 'pw', 'rk', 'salt', 'v'])
+    expect(ring && Object.keys(ring).sort()).toEqual(['created', 'mk', 'mkid', 'v'])
+    expect((await accountRingOf(a.sync.syncConfig()!.token!, a))?.id).toBe(ring && 'mkid' in ring ? ring.mkid : null)
 
     const b = await device()
     expect((await on(b, () => b.signin.signIn(who, 'first password'))).kind).toBe('done')
@@ -150,11 +158,12 @@ describe.skipIf(!APP || !ACCOUNT)('end to end, both Workers running locally', ()
     })
     expect(a.sync.syncStatus()).toMatchObject({ state: 'idle', dirty: false })
     expect(await on(a, () => a.signin.replaceRecoveryKey())).toEqual({ kind: 'password' })
+    await on(a, () => a.signin.recoverySaved())
 
     // A new device: the new password signs in, but doesn't open the keyring.
     const c = await device()
     expect(await on(c, () => c.signin.signIn(who, 'second password'))).toEqual({ kind: 'recovery' })
-    const other = c.keys.formatRecoveryKey(c.keys.newRecoveryKey())
+    const other = AK.formatRecovery(c.keys.newRecoveryKey())
     expect(await on(c, () => c.signin.withRecoveryKey(other))).toEqual({ kind: 'fail', message: 'That recovery key doesn’t open this account' })
     expect((await on(c, () => c.signin.withRecoveryKey(recovery.toLowerCase()))).kind).toBe('done')
     expect(c.S.getDB().txns.afterReset).toBeTruthy()
@@ -169,13 +178,13 @@ describe.skipIf(!APP || !ACCOUNT)('end to end, both Workers running locally', ()
     if (!login.ok) throw new Error(login.message)
     const changed = await fetch(`${ACCOUNT}/password`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${login.token}` }, body: JSON.stringify({ old: 'second password', next: 'third password' }) })
     expect(changed.status).toBe(200)
-    const before = await keyringOf(login.token, d)
+    const before = await accountRingOf(login.token, d)
     expect(await on(a, () => a.signin.signIn(who, 'third password'))).toEqual({ kind: 'done', recovery: undefined })
-    const after = await keyringOf(a.sync.syncConfig()!.token!, a)
-    expect(after!.created).toBe(before!.created)
+    const after = await accountRingOf(a.sync.syncConfig()!.token!, a)
+    expect(after!.id).toBe(before!.id)
     expect(after!.rk).toEqual(before!.rk)
-    expect(await a.keys.unlockWithPassword(after!, 'third password')).toBeTruthy()
-    expect(await a.keys.unlockWithRecovery(after!, a.keys.parseRecoveryKey(recovery)!)).toBeTruthy()
+    expect(await AK.openWithPassword(after!, 'third password')).toBeTruthy()
+    expect(await AK.openWithRecovery(after!, recovery)).toBeTruthy()
   })
 
   it('migrates an old account with real data, losslessly, and its other device follows', async () => {
